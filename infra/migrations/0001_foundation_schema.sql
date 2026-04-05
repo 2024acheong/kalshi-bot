@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS market_catalog (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())
 );
 
+ALTER TABLE market_catalog
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()),
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now());
+
 CREATE TABLE IF NOT EXISTS market_snapshots (
     id BIGSERIAL PRIMARY KEY,
     ticker TEXT NOT NULL REFERENCES market_catalog(ticker) ON DELETE CASCADE,
@@ -58,6 +62,9 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     raw_sequence BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())
 );
+
+ALTER TABLE market_snapshots
+    ADD COLUMN IF NOT EXISTS raw_sequence BIGINT;
 
 CREATE TABLE IF NOT EXISTS feature_snapshots (
     id BIGSERIAL PRIMARY KEY,
@@ -173,6 +180,19 @@ CREATE TABLE IF NOT EXISTS system_events (
     payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())
 );
+
+ALTER TABLE system_events
+    ADD COLUMN IF NOT EXISTS payload_json JSONB;
+
+UPDATE system_events
+SET payload_json = COALESCE(payload_json, payload, '{}'::jsonb)
+WHERE payload_json IS NULL;
+
+ALTER TABLE system_events
+    ALTER COLUMN payload_json SET DEFAULT '{}'::jsonb;
+
+ALTER TABLE system_events
+    ALTER COLUMN payload_json SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_strategy_configs_status
     ON strategy_configs (status);
