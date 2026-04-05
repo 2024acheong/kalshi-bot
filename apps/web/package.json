@@ -9,8 +9,12 @@
   },
   "dependencies": {
     "@kalshi/contracts": "workspace:*",
+    "@supabase/supabase-js": "^2.101.1",
     "next": "^15.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2"
   }
 }
