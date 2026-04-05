@@ -21,6 +21,7 @@ class StubKalshiClient:
 
 @pytest.mark.asyncio
 async def test_poll_once_persists_snapshots_and_caches_latest_state() -> None:
+    now = datetime.now(timezone.utc)
     repository = InMemoryMarketRepository()
     cache = InMemoryMarketCache()
     runtime = IngestionRuntime(
@@ -32,7 +33,7 @@ async def test_poll_once_persists_snapshots_and_caches_latest_state() -> None:
                     "ticker": "KXBTC-26APR-B90000",
                     "title": "BTC above 90k by Apr 26?",
                     "status": "open",
-                    "last_price_ts": "2026-04-05T13:00:00Z",
+                    "last_price_ts": now.isoformat(),
                     "yes_bid": "44",
                     "yes_ask": "46",
                 },
@@ -40,7 +41,7 @@ async def test_poll_once_persists_snapshots_and_caches_latest_state() -> None:
                     "ticker": "KXETH-26APR-B2000",
                     "title": "ETH above 2k by Apr 26?",
                     "status": "open",
-                    "last_price_ts": "2026-04-05T13:00:01Z",
+                    "last_price_ts": (now - timedelta(seconds=1)).isoformat(),
                     "yes_bid": "51",
                     "yes_ask": "52",
                 },
