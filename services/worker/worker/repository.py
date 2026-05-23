@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol
 
-import asyncpg
+try:
+    import asyncpg
+except ImportError:  # pragma: no cover - allows tests to run without optional deps installed
+    asyncpg = Any  # type: ignore[assignment]
 
-from core.schemas import MarketState
-from worker.normalization import market_catalog_row, market_snapshot_row
+from core.schemas.market import MarketState
+from worker.normalizer import market_catalog_row, market_snapshot_row
 
 
 class MarketRepository(Protocol):
@@ -77,7 +81,7 @@ class PostgresMarketRepository:
                 VALUES ($1, $2::jsonb, NOW())
                 """,
                 event_type,
-                payload,
+                json.dumps(payload),
             )
 
     async def close(self) -> None:

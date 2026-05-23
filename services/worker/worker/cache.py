@@ -5,9 +5,12 @@ from datetime import timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
-from redis.asyncio import Redis
+try:
+    from redis.asyncio import Redis
+except ImportError:  # pragma: no cover - allows tests to run without optional deps installed
+    Redis = Any  # type: ignore[misc,assignment]
 
-from core.schemas import MarketState
+from core.schemas.market import MarketState
 
 
 class MarketCache(Protocol):
