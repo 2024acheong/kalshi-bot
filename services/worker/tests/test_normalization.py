@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from core.schemas import MarketStatus
+from core.schemas.market import MarketStatus
 from worker.cache import serialize_market_state
 from worker.normalization import market_catalog_row, market_snapshot_row, normalize_market
 
