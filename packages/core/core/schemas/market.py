@@ -59,4 +59,9 @@ class FeatureVector:
     spread_ticks: Optional[float]
     bid_ask_imbalance: Optional[float]
     time_to_close_hours: Optional[float]
-    # more features added as Person A builds feat/features
+    implied_probability: Optional[float]
+    liquidity_score: Optional[float]
+    price_momentum_1h: Optional[float]
+    price_momentum_24h: Optional[float]
+    volume_zscore: Optional[float]
+    open_interest_delta: Optional[float]
