@@ -34,4 +34,10 @@ export interface FeatureVector {
   spreadTicks: number | null;
   bidAskImbalance: number | null;
   timeToCloseHours: number | null;
+  impliedProbability: number | null;
+  liquidityScore: number | null;
+  priceMomentum1h: number | null;
+  priceMomentum24h: number | null;
+  volumeZscore: number | null;
+  openInterestDelta: number | null;
 }
