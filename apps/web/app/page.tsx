@@ -1,77 +1,228 @@
+import { formatAge, formatCurrency, formatDateTime, formatNumber } from '@/components/Format'
+import { StatusBadge } from '@/components/StatusBadge'
 import { supabase } from '@/lib/supabase'
 
-export default async function Home() {
-  const { data: markets, error } = await supabase
-    .from('market_catalog')
-    .select(`
-      ticker,
-      title,
-      category,
-      status,
-      close_time,
-      market_snapshots (
-        yes_bid,
-        yes_ask,
-        last_price,
-        timestamp
-      )
-    `)
-    .order('synced_at', { ascending: false })
-    .limit(10)
+export const dynamic = 'force-dynamic'
 
-  if (error) {
-    console.error(error)
-    return <div>Error loading markets: {error.message}</div>
-  }
+type FillRow = {
+  id: string
+  fill_price: number | string | null
+  fill_qty: number | null
+  fee: number | string | null
+  fill_type: string | null
+  created_at: string | null
+}
+
+type OrderRow = {
+  id: string
+  ticker: string | null
+  intent: string | null
+  side: string | null
+  price: number | string | null
+  qty: number | null
+  risk_decision: string | null
+  status: string | null
+  created_at: string | null
+  fills?: FillRow[] | null
+}
+
+function startOfTodayIso() {
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  return start.toISOString()
+}
+
+function fillGross(fill: FillRow) {
+  return Number(fill.fill_qty ?? 0) * Number(fill.fill_price ?? 0)
+}
+
+export default async function OverviewPage() {
+  const startIso = startOfTodayIso()
+
+  const [
+    ordersToday,
+    fillsToday,
+    latestSnapshot,
+    recentOrders,
+  ] = await Promise.all([
+    supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .gte('created_at', startIso),
+    supabase
+      .from('fills')
+      .select('fill_qty, fill_price, fee, created_at')
+      .gte('created_at', startIso),
+    supabase
+      .from('market_snapshots')
+      .select('created_at')
+      .order('created_at', { ascending: false })
+      .limit(1),
+    supabase
+      .from('orders')
+      .select(`
+        id,
+        ticker,
+        intent,
+        side,
+        price,
+        qty,
+        risk_decision,
+        status,
+        created_at,
+        fills (
+          id,
+          fill_price,
+          fill_qty,
+          fee,
+          fill_type,
+          created_at
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .limit(15),
+  ])
+
+  const fills = (fillsToday.data ?? []) as FillRow[]
+  const grossExposure = fills.reduce((total, fill) => total + fillGross(fill), 0)
+  const feesPaid = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
+  const latestActivity = latestSnapshot.data?.[0]?.created_at ?? null
+  const workerIsStale =
+    !latestActivity || Date.now() - new Date(latestActivity).getTime() > 2 * 60 * 1000
+  const recent = (recentOrders.data ?? []) as OrderRow[]
+  const allowedOrders = recent.filter((order) => order.risk_decision === 'allow').length
+  const blockedOrders = recent.filter((order) => order.risk_decision === 'block').length
+  const filledOrders = recent.filter((order) => (order.fills ?? []).length > 0).length
+  const activityBars = recent.length > 0
+    ? recent
+        .slice()
+        .reverse()
+        .map((order, index) => {
+          const qty = Number(order.qty ?? 0)
+          const base = 18 + ((index + 1) / Math.max(recent.length, 1)) * 54
+          return Math.min(100, Math.max(18, base + qty))
+        })
+    : [24, 30, 28, 42, 38, 55, 51, 66, 63, 74, 70, 82, 78, 88, 84]
 
   return (
-    <main style={{
-      padding: '2rem',
-      fontFamily: 'monospace',
-      backgroundColor: '#0f0f0f',
-      minHeight: '100vh',
-      color: '#e2e8f0'
-    }}>
-      <h1 style={{ color: '#60a5fa', marginBottom: '0.5rem' }}>
-        Kalshi Bot
-      </h1>
-      <p style={{ color: '#64748b', marginBottom: '2rem', fontSize: '0.85rem' }}>
-        {markets?.length ?? 0} markets tracked
-      </p>
+    <>
+      <section className="pageHeader">
+        <div>
+          <h1 className="pageTitle">Overview</h1>
+          <p className="pageKicker">Worker health, trading volume, and recent decisions.</p>
+        </div>
+        {workerIsStale ? (
+          <span className="badge badgeYellow">Worker may be offline</span>
+        ) : (
+          <span className="badge badgeGreen">Worker active</span>
+        )}
+      </section>
 
-      {markets?.map(m => {
-        const snap = m.market_snapshots?.[0]
-        return (
-          <div key={m.ticker} style={{
-            marginBottom: '1rem',
-            padding: '1rem',
-            border: '1px solid #1e293b',
-            borderRadius: '6px',
-            backgroundColor: '#1a1a2e'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <span style={{ color: '#60a5fa', fontWeight: 'bold', fontSize: '0.85rem' }}>
-                  {m.ticker}
-                </span>
-                <p style={{ margin: '0.25rem 0', fontSize: '0.9rem' }}>{m.title}</p>
-                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                  {m.category} · closes {m.close_time ? new Date(m.close_time).toLocaleDateString() : 'N/A'}
-                </span>
-              </div>
-              {snap && (
-                <div style={{ textAlign: 'right', fontSize: '0.85rem' }}>
-                  <div style={{ color: '#4ade80' }}>Bid: {snap.yes_bid ?? '—'}</div>
-                  <div style={{ color: '#f87171' }}>Ask: {snap.yes_ask ?? '—'}</div>
-                  <div style={{ color: '#94a3b8', fontSize: '0.75rem' }}>
-                    Last: {snap.last_price ?? '—'}
+      <section className="grid summaryGrid">
+        <div className="card">
+          <div className="cardLabel">Orders Today</div>
+          <div className="cardValue">{ordersToday.count ?? 0}</div>
+        </div>
+        <div className="card">
+          <div className="cardLabel">Fills Today</div>
+          <div className="cardValue">{fills.length}</div>
+          <div className="cardMeta">{formatCurrency(grossExposure)} gross exposure</div>
+        </div>
+        <div className="card">
+          <div className="cardLabel">Fees Today</div>
+          <div className="cardValue">{formatCurrency(feesPaid)}</div>
+        </div>
+        <div className="card">
+          <div className="cardLabel">Latest Snapshot</div>
+          <div className="cardValue">{formatAge(latestActivity)}</div>
+          <div className="cardMeta">{formatDateTime(latestActivity)}</div>
+        </div>
+      </section>
+
+      <section className="cockpitGrid">
+        <div className="chartPanel">
+          <div className="pageHeader">
+            <div>
+              <h2 className="pageTitle">Execution Curve</h2>
+              <p className="pageKicker">Recent order activity by submission sequence.</p>
+            </div>
+            <span className="badge badgeGray">last {recent.length || 15}</span>
+          </div>
+          <div className="equityBars" aria-label="Recent order activity chart">
+            {activityBars.map((height, index) => (
+              <div
+                aria-hidden="true"
+                className="equityBar"
+                key={`${height}-${index}`}
+                style={{ height: `${height}%` }}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className="metricsPanel">
+          <div className="cardLabel">Strategy Metrics</div>
+          <div className="metricLine">
+            <span className="muted">Allowed Orders</span>
+            <span className="mono green">{allowedOrders}</span>
+          </div>
+          <div className="metricLine">
+            <span className="muted">Blocked Orders</span>
+            <span className="mono red">{blockedOrders}</span>
+          </div>
+          <div className="metricLine">
+            <span className="muted">Filled Orders</span>
+            <span className="mono blue">{filledOrders}</span>
+          </div>
+          <div className="metricLine">
+            <span className="muted">Net After Fees</span>
+            <span className="mono">{formatCurrency(grossExposure - feesPaid)}</span>
+          </div>
+          <div className="metricLine">
+            <span className="muted">Worker Activity</span>
+            <span className={workerIsStale ? 'mono yellow' : 'mono green'}>
+              {workerIsStale ? 'stale' : 'live'}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div className="pageHeader">
+          <div>
+            <h2 className="pageTitle">Recent Activity</h2>
+            <p className="pageKicker">Last 15 orders with fill outcomes.</p>
+          </div>
+        </div>
+        <div className="activityList">
+          {recent.map((order) => {
+            const fillsForOrder = order.fills ?? []
+            const filledQty = fillsForOrder.reduce((total, fill) => total + Number(fill.fill_qty ?? 0), 0)
+            const fillText =
+              fillsForOrder.length > 0
+                ? `${filledQty} filled via ${fillsForOrder[0]?.fill_type ?? 'fill'}`
+                : 'no fill'
+            return (
+              <div className="activityItem" key={order.id}>
+                <div>
+                  <div className="blue">{order.ticker ?? '-'}</div>
+                  <div className="muted">
+                    {order.intent ?? '-'} / {order.side ?? '-'} / {formatDateTime(order.created_at)}
                   </div>
                 </div>
-              )}
-            </div>
-          </div>
-        )
-      })}
-    </main>
+                <div>
+                  <div>{formatNumber(order.qty)} @ {formatNumber(order.price)}</div>
+                  <div className="muted">status {order.status ?? '-'}</div>
+                </div>
+                <div>
+                  <StatusBadge value={order.risk_decision} />
+                  <div className="cardMeta">{fillText}</div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </section>
+    </>
   )
 }
