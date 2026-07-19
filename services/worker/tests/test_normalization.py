@@ -77,3 +77,21 @@ def test_serialize_market_state_for_redis() -> None:
     assert '"ticker": "KXETH-26APR-B2000"' in serialized
     assert '"yes_bid": "0.51"' in serialized
     assert '"source": "rest_poll"' in serialized
+
+
+def test_market_snapshot_row_includes_raw_sequence() -> None:
+    market = normalize_market(
+        {
+            "ticker": "KXBTC-26APR-B90000",
+            "status": "open",
+            "yes_bid": "45",
+            "yes_ask": "47",
+            "last_price_ts": "2026-04-05T13:00:00Z",
+            "seq": 42,
+        },
+        source="websocket",
+    )
+
+    row = market_snapshot_row(market)
+
+    assert row["raw_sequence"] == 42

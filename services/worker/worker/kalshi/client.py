@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 class KalshiRestClient:
@@ -103,7 +108,8 @@ class KalshiRestClient:
                 series = [series]
             else:
                 raise ValueError(
-                    f"Kalshi series payload dict did not contain a ticker; payload keys={sorted(payload.keys())}"
+                    "Kalshi series payload dict did not contain a ticker; "
+                    f"payload keys={sorted(payload.keys())}"
                 )
         if not isinstance(series, list):
             raise ValueError(
@@ -111,3 +117,119 @@ class KalshiRestClient:
             )
         next_cursor = payload.get("cursor") or payload.get("next_cursor")
         return series, str(next_cursor) if next_cursor else None
+
+
+async def fetch_top_liquid_tickers(
+    limit: int = 5,
+    min_volume: int = 1,
+    max_pages: int = 10,
+) -> list[str]:
+    base_url = os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2")
+    markets: list[dict[str, Any]] = []
+    cursor: str | None = None
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        client = KalshiRestClient(http_client=http_client, base_url=base_url)
+        for _ in range(max_pages):
+            page, cursor = await client.list_markets(
+                status="open",
+                limit=100,
+                cursor=cursor,
+            )
+            markets.extend(page)
+            if not cursor:
+                break
+
+    quote_filtered = [market for market in markets if _has_live_quote(market)]
+    liquid_markets = [
+        market
+        for market in quote_filtered
+        if _market_volume(market) >= min_volume
+    ]
+    logger.info(
+        "Fetched %d open markets; %d have live quotes; %d meet min_volume=%d",
+        len(markets),
+        len(quote_filtered),
+        len(liquid_markets),
+        min_volume,
+    )
+    if not liquid_markets:
+        logger.info("Sample raw Kalshi markets for ticker selection: %s", markets[:5])
+    else:
+        logger.debug("Sample raw Kalshi markets for ticker selection: %s", markets[:5])
+
+    sorted_markets = sorted(
+        liquid_markets,
+        key=lambda market: _market_volume(market),
+        reverse=True,
+    )
+    return [
+        str(market["ticker"])
+        for market in sorted_markets[:limit]
+        if market.get("ticker") is not None
+    ]
+
+
+def _market_volume(market: dict[str, Any]) -> int:
+    for field in (
+        "volume",
+        "volume_24h",
+        "volume_fp",
+        "volume_24h_fp",
+        "volume_24h_contracts",
+        "volume_contracts",
+    ):
+        parsed = _decimal_value(market.get(field))
+        if parsed is not None:
+            return int(parsed)
+    return 0
+
+
+def _has_live_quote(market: dict[str, Any]) -> bool:
+    return _has_quote_with_size(
+        market,
+        ("yes_bid", "yes_bid_dollars"),
+        ("yes_bid_size", "yes_bid_size_fp"),
+    ) or _has_quote_with_size(
+        market,
+        ("yes_ask", "yes_ask_dollars"),
+        ("yes_ask_size", "yes_ask_size_fp"),
+    )
+
+
+def _has_quote_with_size(
+    market: dict[str, Any],
+    quote_fields: tuple[str, ...],
+    size_fields: tuple[str, ...],
+) -> bool:
+    quote = _first_positive_decimal(market, quote_fields)
+    if quote is None:
+        return False
+
+    size_values = [
+        _decimal_value(market.get(field))
+        for field in size_fields
+        if market.get(field) is not None
+    ]
+    if not size_values:
+        return True
+    return any(size is not None and size > 0 for size in size_values)
+
+
+def _first_positive_decimal(
+    market: dict[str, Any],
+    fields: tuple[str, ...],
+) -> Decimal | None:
+    for field in fields:
+        parsed = _decimal_value(market.get(field))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _decimal_value(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None

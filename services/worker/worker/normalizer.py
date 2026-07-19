@@ -77,7 +77,11 @@ def normalize_market(raw_market: dict[str, Any], *, source: str) -> MarketState:
 
 
 def normalize_ws_ticker_message(msg: dict[str, Any]) -> MarketState | None:
-    if msg.get("type") != "ticker":
+    message_type = msg.get("type")
+    if message_type == "orderbook_snapshot":
+        return _normalize_ws_orderbook_snapshot(msg)
+
+    if message_type != "ticker":
         return None
     ticker = msg.get("market_ticker")
     payload = msg.get("msg")
@@ -100,13 +104,92 @@ def normalize_ws_ticker_message(msg: dict[str, Any]) -> MarketState | None:
             or payload.get("price")
             or payload.get("price_dollars")
         ),
-        volume_24h=_parse_int(payload.get("volume") or payload.get("volume_fp") or payload.get("dollar_volume")),
-        open_interest=_parse_int(payload.get("open_interest") or payload.get("open_interest_fp") or payload.get("dollar_open_interest")),
+        volume_24h=_parse_int(
+            payload.get("volume") or payload.get("volume_fp") or payload.get("dollar_volume")
+        ),
+        open_interest=_parse_int(
+            payload.get("open_interest")
+            or payload.get("open_interest_fp")
+            or payload.get("dollar_open_interest")
+        ),
         close_time=None,
         status=MarketStatus.OPEN,
         source="websocket",
         raw_sequence=_parse_int(msg.get("seq")),
     )
+
+
+def _normalize_ws_orderbook_snapshot(msg: dict[str, Any]) -> MarketState | None:
+    ticker = msg.get("market_ticker")
+    payload = msg.get("msg")
+    if ticker is None or not isinstance(payload, dict):
+        return None
+
+    yes_book = _parse_orderbook_side(payload.get("yes"))
+    no_book = _parse_orderbook_side(payload.get("no"))
+    yes_bid_price, yes_bid_size = _best_book_level(yes_book)
+    no_bid_price, no_bid_size = _best_book_level(no_book)
+    yes_ask = Decimal("1") - no_bid_price if no_bid_price is not None else None
+
+    timestamp = (
+        _parse_datetime(payload.get("time"))
+        or _parse_datetime(payload.get("ts"))
+        or datetime.now(timezone.utc)
+    )
+    return MarketState(
+        ticker=str(ticker),
+        timestamp=timestamp,
+        yes_bid=yes_bid_price,
+        yes_ask=yes_ask,
+        yes_bid_size=yes_bid_size,
+        yes_ask_size=no_bid_size,
+        last_price=None,
+        volume_24h=None,
+        open_interest=None,
+        close_time=None,
+        status=MarketStatus.OPEN,
+        source="websocket",
+        raw_sequence=_parse_int(msg.get("seq")),
+    )
+
+
+def _parse_orderbook_side(levels: Any) -> dict[int, int]:
+    if not isinstance(levels, list):
+        return {}
+
+    book: dict[int, int] = {}
+    for level in levels:
+        parsed = _parse_book_level(level)
+        if parsed is None:
+            continue
+        price_cents, quantity = parsed
+        if quantity > 0:
+            book[price_cents] = quantity
+    return book
+
+
+def _parse_book_level(level: Any) -> tuple[int, int] | None:
+    if isinstance(level, dict):
+        price = level.get("price") or level.get("price_cents")
+        quantity = level.get("quantity") or level.get("qty") or level.get("size")
+    elif isinstance(level, (list, tuple)) and len(level) >= 2:
+        price = level[0]
+        quantity = level[1]
+    else:
+        return None
+
+    parsed_price = _parse_int(price)
+    parsed_quantity = _parse_int(quantity)
+    if parsed_price is None or parsed_quantity is None:
+        return None
+    return parsed_price, parsed_quantity
+
+
+def _best_book_level(book: dict[int, int]) -> tuple[Decimal | None, int | None]:
+    if not book:
+        return None, None
+    price_cents = max(book)
+    return Decimal(price_cents) / Decimal("100"), book[price_cents]
 
 
 def market_catalog_row(raw_market: dict[str, Any], market: MarketState) -> dict[str, Any]:
@@ -132,4 +215,5 @@ def market_snapshot_row(market: MarketState) -> dict[str, Any]:
         "volume_24h": market.volume_24h,
         "open_interest": market.open_interest,
         "source": market.source,
+        "raw_sequence": market.raw_sequence,
     }

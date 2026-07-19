@@ -7,12 +7,45 @@ from core.execution.adapters import FillResult
 
 
 def _get_supabase() -> Any:
-    try:
-        from worker.storage import supabase
-    except ImportError:
-        from worker.slice import supabase
+    from worker.storage import supabase
 
     return supabase
+
+
+def _response_id(response: Any, table: str) -> str:
+    if not response.data:
+        raise RuntimeError(f"Supabase returned no rows when writing {table}")
+    return response.data[0]["id"]
+
+
+def ensure_strategy_config(name: str, version: int, params: dict | None = None) -> str:
+    """
+    Upsert a strategy_configs row for name+version and return its id.
+    """
+    row = {
+        "name": name,
+        "version": version,
+        "params_json": params or {},
+    }
+    response = (
+        _get_supabase()
+        .table("strategy_configs")
+        .upsert(row, on_conflict="name,version")
+        .execute()
+    )
+    return _response_id(response, "strategy_configs")
+
+
+def create_strategy_run(config_id: str, mode: str = "paper") -> str:
+    """
+    Insert a strategy_runs row and return its id for use as the runtime run_id.
+    """
+    row = {
+        "config_id": config_id,
+        "mode": mode,
+    }
+    response = _get_supabase().table("strategy_runs").insert(row).execute()
+    return _response_id(response, "strategy_runs")
 
 
 def persist_order(
@@ -41,7 +74,7 @@ def persist_order(
         "metadata_json": metadata or {},
     }
     response = _get_supabase().table("orders").insert(row).execute()
-    return response.data[0]["id"]
+    return _response_id(response, "orders")
 
 
 def persist_fill(
@@ -59,7 +92,7 @@ def persist_fill(
     }
     response = _get_supabase().table("fills").insert(row).execute()
     update_order_status(order_id, fill_result.status.value)
-    return response.data[0]["id"]
+    return _response_id(response, "fills")
 
 
 def update_order_status(order_id: str, status: str) -> None:
