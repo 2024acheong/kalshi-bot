@@ -57,6 +57,10 @@ class KalshiWebSocketClient:
         self._websocket: Any = None
 
     async def run(self) -> None:
+        if not self._tickers:
+            self._logger.warning("No websocket tickers configured; skipping websocket connection")
+            return
+
         try:
             import websockets
         except ImportError as exc:
@@ -122,6 +126,10 @@ class KalshiWebSocketClient:
         )
 
     async def _subscribe(self, websocket: Any) -> None:
+        if not self._tickers:
+            self._logger.warning("No websocket tickers configured; skipping subscription")
+            return
+
         self._logger.info(
             "Subscribing to websocket channels for %d tickers",
             len(self._tickers),

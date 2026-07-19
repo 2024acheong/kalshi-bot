@@ -57,9 +57,10 @@ class PostgresMarketRepository:
                 """
                 INSERT INTO market_snapshots (
                     ticker, timestamp, yes_bid, yes_ask, yes_bid_size,
-                    yes_ask_size, last_price, volume_24h, open_interest, source
+                    yes_ask_size, last_price, volume_24h, open_interest,
+                    source, raw_sequence
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 row["ticker"],
                 row["timestamp"],
@@ -71,6 +72,7 @@ class PostgresMarketRepository:
                 row["volume_24h"],
                 row["open_interest"],
                 row["source"],
+                row["raw_sequence"],
             )
 
     async def insert_system_event(self, event_type: str, payload: dict[str, Any]) -> None:
@@ -96,7 +98,11 @@ class InMemoryMarketRepository:
 
     async def upsert_catalog(self, raw_market: dict[str, Any], market: MarketState) -> None:
         row = market_catalog_row(raw_market, market)
-        self.catalog_rows = [existing for existing in self.catalog_rows if existing["ticker"] != row["ticker"]]
+        self.catalog_rows = [
+            existing
+            for existing in self.catalog_rows
+            if existing["ticker"] != row["ticker"]
+        ]
         self.catalog_rows.append(row)
 
     async def insert_snapshot(self, market: MarketState) -> None:

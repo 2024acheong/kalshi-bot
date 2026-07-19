@@ -8,6 +8,13 @@ from typing import Any
 from core.schemas import MarketState
 
 
+logger = logging.getLogger(__name__)
+
+
+def emit_alert(event_type: str, payload: dict[str, Any]) -> None:
+    logger.warning("%s: %s", event_type, payload)
+
+
 @dataclass
 class AlertEvent:
     level: str
