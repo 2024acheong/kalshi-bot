@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from core.execution.adapters import PaperAdapter
 from core.risk.engine import RiskEngine
 from worker.config import WorkerSettings
+from worker.command_listener import CommandListener
 from worker.execution_repository import create_strategy_run, ensure_strategy_config
 from worker.runtime import TradingRuntime
 from worker.service import build_runtime
@@ -54,15 +55,21 @@ async def main() -> None:
         watched_tickers=watched_tickers,
         on_market_update=runtime.on_market_update,
     )
+    listener = CommandListener(runtime=runtime, config_id=config_id)
 
     try:
-        await ingestion.run()
+        await asyncio.gather(
+            ingestion.run(),
+            listener.listen(),
+        )
     except KeyboardInterrupt:
         ingestion.stop()
         runtime.stop()
+        listener.stop()
     finally:
         ingestion.stop()
         runtime.stop()
+        listener.stop()
         await ingestion.close()
 
 
