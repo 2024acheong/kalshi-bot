@@ -139,3 +139,8 @@ class TradingRuntime:
 
     def activate_kill_switch(self) -> None:
         self._kill_switch_active = True
+        self._global_kill_switch = True
+
+    def deactivate_kill_switch(self) -> None:
+        self._global_kill_switch = False
+        self._kill_switch_active = False

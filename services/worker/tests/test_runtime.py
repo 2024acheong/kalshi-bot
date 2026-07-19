@@ -115,6 +115,25 @@ def test_dummy_strategy_generates_intent_on_good_conditions() -> None:
     assert intent.qty == 10
 
 
+def test_runtime_activate_kill_switch_sets_flags() -> None:
+    runtime = make_runtime()
+
+    runtime.activate_kill_switch()
+
+    assert runtime._kill_switch_active is True
+    assert runtime._global_kill_switch is True
+
+
+def test_runtime_deactivate_kill_switch_clears_flags() -> None:
+    runtime = make_runtime()
+    runtime.activate_kill_switch()
+
+    runtime.deactivate_kill_switch()
+
+    assert runtime._kill_switch_active is False
+    assert runtime._global_kill_switch is False
+
+
 @pytest.mark.anyio
 async def test_runtime_paused_does_not_evaluate() -> None:
     strategy = MagicMock()
