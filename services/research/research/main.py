@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 
 from core.execution.adapters import PaperAdapter
 from core.risk.engine import RiskConfig, RiskEngine
+from core.strategies.calibration_mispricing import (
+    CalibrationMispricingStrategy,
+    NaiveMidpointDriftEstimator,
+)
 from core.strategies.event_drift import EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureStrategy
@@ -49,7 +53,22 @@ def build_spread_capture_risk_engine() -> RiskEngine:
     return RiskEngine(config=spread_capture_risk_config)
 
 
+def build_calibration_mispricing_risk_engine() -> RiskEngine:
+    # Calibration mispricing sizes orders upstream with Brier-linear sizing from
+    # the forecast-market margin. Kelly's minimum-edge heuristic is neutralized
+    # for this strategy because Kelly treats forecasts as ground truth, while the
+    # proper-betting result motivates linear sizing under calibration uncertainty.
+    # Other gates still run normally.
+    calibration_risk_config = RiskConfig(min_edge_to_trade=0.0)
+    return RiskEngine(config=calibration_risk_config)
+
+
 def build_strategy_and_risk_engine(strategy_name: str):
+    if strategy_name == "calibration_mispricing":
+        return (
+            CalibrationMispricingStrategy(estimator=NaiveMidpointDriftEstimator()),
+            build_calibration_mispricing_risk_engine(),
+        )
     if strategy_name == "event_drift":
         return EventDriftStrategy(), RiskEngine()
     if strategy_name == "mean_reversion":
@@ -57,7 +76,8 @@ def build_strategy_and_risk_engine(strategy_name: str):
     if strategy_name == "spread_capture":
         return SpreadCaptureStrategy(), build_spread_capture_risk_engine()
     raise ValueError(
-        "BACKTEST_STRATEGY must be one of: event_drift, mean_reversion, spread_capture"
+        "BACKTEST_STRATEGY must be one of: calibration_mispricing, event_drift, "
+        "mean_reversion, spread_capture"
     )
 
 
