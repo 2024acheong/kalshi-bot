@@ -8,6 +8,10 @@ from core.execution.resting_orders import RestingOrder, RestingOrderBook
 from core.features.compute import compute_features
 from core.risk.engine import OrderIntent, RiskEngine
 from core.schemas.market import FeatureVector, MarketState, OrderIntentStatus, RiskDecision
+from core.strategies.calibration_mispricing import (
+    CalibrationMispricingPosition,
+    CalibrationMispricingStrategy,
+)
 from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
@@ -34,7 +38,10 @@ class TradingRuntime:
         self.risk_engine = risk_engine
         self.paper_adapter = paper_adapter
         self._resting_orders = RestingOrderBook(paper_adapter=self.paper_adapter)
-        self._open_positions: dict[str, MeanReversionPosition | EventDriftPosition] = {}
+        self._open_positions: dict[
+            str,
+            MeanReversionPosition | EventDriftPosition | CalibrationMispricingPosition,
+        ] = {}
         self.history_window = history_window
         self._history: dict[str, list[MarketState]] = {ticker: [] for ticker in tickers}
         self._running = False
@@ -61,6 +68,10 @@ class TradingRuntime:
             return
 
         features = compute_features(market, history=history)
+        if isinstance(self.strategy, CalibrationMispricingStrategy):
+            await self._process_calibration_mispricing_update(market, features, as_of)
+            return
+
         if isinstance(self.strategy, EventDriftStrategy):
             await self._process_event_drift_update(market, features, as_of)
             return
@@ -199,6 +210,64 @@ class TradingRuntime:
         )
         logger.info(
             "Event drift position opened ticker=%s side=%s price=%s qty=%s",
+            market.ticker,
+            entry_intent.side,
+            fill_result.fill_price,
+            fill_result.fill_qty,
+        )
+
+    async def _process_calibration_mispricing_update(
+        self,
+        market: MarketState,
+        features: FeatureVector,
+        as_of: datetime,
+    ) -> None:
+        position = self._open_positions.get(market.ticker)
+        if position is not None:
+            exit_intent = self.strategy.evaluate_exit(
+                position,
+                market,
+                features,
+                as_of=as_of,
+            )
+            if exit_intent is None:
+                return
+
+            exit_intent.run_id = self.run_id
+            fill_result = await self._process_intent(exit_intent, market, features)
+            if fill_result is None or fill_result.fill_qty <= 0:
+                return
+
+            self._open_positions.pop(market.ticker, None)
+            logger.info(
+                "Calibration mispricing position closed ticker=%s side=%s "
+                "entry_price=%s exit_price=%s qty=%s",
+                market.ticker,
+                position.side,
+                position.entry_price,
+                fill_result.fill_price,
+                fill_result.fill_qty,
+            )
+            return
+
+        entry_intent = self.strategy.evaluate_entry(market, features, self.run_id)
+        if entry_intent is None:
+            return
+
+        fill_result = await self._process_intent(entry_intent, market, features)
+        if fill_result is None or fill_result.fill_qty <= 0:
+            return
+
+        self._open_positions[market.ticker] = CalibrationMispricingPosition(
+            ticker=market.ticker,
+            side=entry_intent.side,
+            entry_price=fill_result.fill_price,
+            entry_model_prob=entry_intent.model_prob,
+            qty=fill_result.fill_qty,
+            opened_at=as_of,
+        )
+        logger.info(
+            "Calibration mispricing position opened ticker=%s side=%s price=%s qty=%s",
             market.ticker,
             entry_intent.side,
             fill_result.fill_price,

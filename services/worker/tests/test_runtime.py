@@ -16,6 +16,11 @@ from core.schemas.market import (
     OrderIntentStatus,
     RiskDecision,
 )
+from core.strategies.calibration_mispricing import (
+    CalibrationMispricingPosition,
+    CalibrationMispricingStrategy,
+    ProbabilityEstimator,
+)
 from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
@@ -95,6 +100,17 @@ def make_runtime(strategy=None, risk_engine=None, paper_adapter=None, history_wi
         paper_adapter=paper_adapter or MagicMock(),
         history_window=history_window,
     )
+
+
+class SequenceEstimator(ProbabilityEstimator):
+    def __init__(self, values: list[float | None]):
+        self.values = values
+        self.index = 0
+
+    def estimate(self, market: MarketState, features: FeatureVector) -> float | None:
+        value = self.values[self.index]
+        self.index += 1
+        return value
 
 
 def test_dummy_strategy_holds_on_wide_spread() -> None:
@@ -396,6 +412,77 @@ async def test_runtime_opens_and_closes_event_drift_position(monkeypatch) -> Non
     assert isinstance(position, EventDriftPosition)
     assert position.side == "yes"
     assert position.entry_momentum == 0.05
+
+    await runtime.on_market_update(market)
+
+    assert market.ticker not in runtime._open_positions
+
+
+@pytest.mark.anyio
+async def test_runtime_opens_and_closes_calibration_mispricing_position(
+    monkeypatch,
+) -> None:
+    market = make_market(yes_bid=Decimal("0.40"), yes_ask=Decimal("0.45"))
+    features = FeatureVector(
+        ticker=market.ticker,
+        timestamp=market.timestamp,
+        mid_price=0.42,
+        spread_pct=11.76,
+        spread_ticks=0.05,
+        bid_ask_imbalance=0.0,
+        time_to_close_hours=24.0,
+        implied_probability=0.42,
+        liquidity_score=100.0,
+        price_momentum_1h=None,
+        price_momentum_24h=None,
+        volume_zscore=0.0,
+        open_interest_delta=None,
+    )
+    monkeypatch.setattr("worker.runtime.compute_features", MagicMock(return_value=features))
+    risk_engine = MagicMock()
+    risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
+        intent, RiskDecision.ALLOW
+    )
+    paper_adapter = MagicMock()
+    paper_adapter.submit_order.side_effect = [
+        FillResult(
+            order_id="order-1",
+            fill_price=Decimal("0.45"),
+            fill_qty=3,
+            fee=Decimal("0.05"),
+            fill_latency_ms=200,
+            fill_type="paper",
+            status=OrderIntentStatus.FILLED,
+        ),
+        FillResult(
+            order_id="order-2",
+            fill_price=Decimal("0.40"),
+            fill_qty=3,
+            fee=Decimal("0.05"),
+            fill_latency_ms=200,
+            fill_type="paper",
+            status=OrderIntentStatus.FILLED,
+        ),
+    ]
+    monkeypatch.setattr(
+        "worker.runtime.persist_order",
+        MagicMock(side_effect=["order-1", "order-2"]),
+    )
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+
+    runtime = make_runtime(
+        strategy=CalibrationMispricingStrategy(
+            estimator=SequenceEstimator([0.60, 0.455])
+        ),
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+    )
+    await runtime.on_market_update(market)
+
+    position = runtime._open_positions[market.ticker]
+    assert isinstance(position, CalibrationMispricingPosition)
+    assert position.side == "yes"
+    assert position.entry_model_prob == 0.60
 
     await runtime.on_market_update(market)
 

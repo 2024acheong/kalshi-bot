@@ -10,6 +10,10 @@ import pytest
 from core.execution.adapters import PaperAdapter
 from core.risk.engine import OrderIntent, RiskConfig, RiskEngine
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
+from core.strategies.calibration_mispricing import (
+    CalibrationMispricingStrategy,
+    ProbabilityEstimator,
+)
 from core.strategies.event_drift import EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureStrategy
@@ -59,6 +63,17 @@ class LowEdgeStrategy:
             model_prob=float(market.yes_ask) + 0.01,
             run_id=run_id,
         )
+
+
+class SequenceEstimator(ProbabilityEstimator):
+    def __init__(self, values: list[float | None]):
+        self.values = values
+        self.index = 0
+
+    def estimate(self, market: MarketState, features: FeatureVector) -> float | None:
+        value = self.values[self.index]
+        self.index += 1
+        return value
 
 
 def make_config() -> BacktestConfig:
@@ -217,6 +232,49 @@ def test_backtest_tracks_event_drift_entry_and_exit(monkeypatch) -> None:
     result = Backtester(
         EventDriftStrategy(),
         RiskEngine(),
+        PaperAdapter(),
+        make_config(),
+    ).run()
+
+    assert result["total_intents"] == 2
+    assert result["total_orders_allowed"] == 2
+    assert [fill["side"] for fill in result["fills"]] == ["yes", "no"]
+
+
+def test_backtest_tracks_calibration_mispricing_entry_and_exit(monkeypatch) -> None:
+    snapshots = [
+        make_market(
+            index=0,
+            yes_bid=Decimal("0.40"),
+            yes_ask=Decimal("0.45"),
+        ),
+        make_market(
+            index=1,
+            yes_bid=Decimal("0.40"),
+            yes_ask=Decimal("0.45"),
+        ),
+    ]
+    patch_loader(monkeypatch, snapshots)
+    features = FeatureVector(
+        ticker="KXTEST-26JAN-YES",
+        timestamp=BASE_TIME,
+        mid_price=0.42,
+        spread_pct=11.76,
+        spread_ticks=0.05,
+        bid_ask_imbalance=0.0,
+        time_to_close_hours=24.0,
+        implied_probability=0.42,
+        liquidity_score=100.0,
+        price_momentum_1h=None,
+        price_momentum_24h=None,
+        volume_zscore=0.0,
+        open_interest_delta=None,
+    )
+    monkeypatch.setattr("research.backtester.compute_features", lambda market, history: features)
+
+    result = Backtester(
+        CalibrationMispricingStrategy(estimator=SequenceEstimator([0.60, 0.455])),
+        RiskEngine(config=RiskConfig(min_edge_to_trade=0.0)),
         PaperAdapter(),
         make_config(),
     ).run()
