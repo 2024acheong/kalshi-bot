@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from core.execution.adapters import PaperAdapter
 from core.risk.engine import RiskConfig, RiskEngine
+from core.strategies.event_drift import EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureStrategy
 from research.backtester import Backtester, BacktestConfig
@@ -49,12 +50,14 @@ def build_spread_capture_risk_engine() -> RiskEngine:
 
 
 def build_strategy_and_risk_engine(strategy_name: str):
+    if strategy_name == "event_drift":
+        return EventDriftStrategy(), RiskEngine()
     if strategy_name == "mean_reversion":
         return MeanReversionStrategy(), RiskEngine()
     if strategy_name == "spread_capture":
         return SpreadCaptureStrategy(), build_spread_capture_risk_engine()
     raise ValueError(
-        "BACKTEST_STRATEGY must be one of: mean_reversion, spread_capture"
+        "BACKTEST_STRATEGY must be one of: event_drift, mean_reversion, spread_capture"
     )
 
 

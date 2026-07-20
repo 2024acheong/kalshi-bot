@@ -11,6 +11,7 @@ from core.execution.resting_orders import RestingOrderBook
 from core.features.compute import compute_features
 from core.risk.engine import OrderIntent, RiskEngine
 from core.schemas.market import MarketState, OrderIntentStatus, RiskDecision
+from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
 from research import data_loader
@@ -58,7 +59,7 @@ class Backtester:
         fills: list[dict[str, Any]] = []
         blocked_orders: list[dict[str, Any]] = []
         daily_pnl_by_date: dict[str, float] = defaultdict(float)
-        open_positions: dict[str, MeanReversionPosition] = {}
+        open_positions: dict[str, MeanReversionPosition | EventDriftPosition] = {}
 
         for index, market in enumerate(timeline, start=1):
             close_time = close_times.get(market.ticker, market.close_time)
@@ -92,6 +93,25 @@ class Backtester:
                     )
                 if order.pair_id and fill_result.status == OrderIntentStatus.FILLED:
                     self.resting_orders.cancel_pair(order.pair_id)
+
+            if isinstance(self.strategy, EventDriftStrategy):
+                result = self._process_event_drift_event(
+                    index=index,
+                    market=replay_market,
+                    features=features,
+                    open_positions=open_positions,
+                    current_exposure_usd=current_exposure_usd,
+                    daily_realized_pnl_usd=daily_realized_pnl_usd,
+                    daily_pnl_by_date=daily_pnl_by_date,
+                    fills=fills,
+                    blocked_orders=blocked_orders,
+                )
+                current_exposure_usd = result["current_exposure_usd"]
+                daily_realized_pnl_usd = result["daily_realized_pnl_usd"]
+                total_intents += result["total_intents"]
+                total_orders_allowed += result["total_orders_allowed"]
+                total_orders_blocked += result["total_orders_blocked"]
+                continue
 
             if isinstance(self.strategy, MeanReversionStrategy):
                 result = self._process_mean_reversion_event(
@@ -263,7 +283,7 @@ class Backtester:
         index: int,
         market: MarketState,
         features: Any,
-        open_positions: dict[str, MeanReversionPosition],
+        open_positions: dict[str, MeanReversionPosition | EventDriftPosition],
         current_exposure_usd: float,
         daily_realized_pnl_usd: float,
         daily_pnl_by_date: dict[str, float],
@@ -340,6 +360,109 @@ class Backtester:
                     entry_price=fill_result.fill_price,
                     entry_mid_price=(market.yes_bid + market.yes_ask) / 2,
                     entry_spread_ticks=market.yes_ask - market.yes_bid,
+                    qty=fill_result.fill_qty,
+                    opened_at=market.timestamp,
+                )
+
+        return {
+            "current_exposure_usd": current_exposure_usd,
+            "daily_realized_pnl_usd": daily_realized_pnl_usd,
+            "total_intents": 1,
+            "total_orders_allowed": 1,
+            "total_orders_blocked": 0,
+        }
+
+    def _process_event_drift_event(
+        self,
+        index: int,
+        market: MarketState,
+        features: Any,
+        open_positions: dict[str, MeanReversionPosition | EventDriftPosition],
+        current_exposure_usd: float,
+        daily_realized_pnl_usd: float,
+        daily_pnl_by_date: dict[str, float],
+        fills: list[dict[str, Any]],
+        blocked_orders: list[dict[str, Any]],
+    ) -> dict[str, float | int]:
+        position = open_positions.get(market.ticker)
+        if position is not None:
+            intent = self.strategy.evaluate_exit(
+                position,
+                market,
+                features,
+                as_of=market.timestamp,
+            )
+            leg_index = 1
+        else:
+            intent = self.strategy.evaluate_entry(market, features, run_id="backtest")
+            leg_index = 1
+
+        if intent is None:
+            return {
+                "current_exposure_usd": current_exposure_usd,
+                "daily_realized_pnl_usd": daily_realized_pnl_usd,
+                "total_intents": 0,
+                "total_orders_allowed": 0,
+                "total_orders_blocked": 0,
+            }
+
+        intent.run_id = "backtest"
+        risk_result = self.risk_engine.evaluate(
+            intent=intent,
+            market=market,
+            features=features,
+            open_positions=[],
+            market_category=None,
+            portfolio_value_usd=self.config.starting_portfolio_usd,
+            current_exposure_usd=current_exposure_usd,
+            daily_realized_pnl_usd=daily_realized_pnl_usd,
+        )
+        if risk_result.decision == RiskDecision.BLOCK:
+            blocked_orders.append(
+                self._serialize_blocked_order(
+                    index=index,
+                    leg_index=leg_index,
+                    market=market,
+                    intent=intent,
+                    risk_result=risk_result,
+                )
+            )
+            return {
+                "current_exposure_usd": current_exposure_usd,
+                "daily_realized_pnl_usd": daily_realized_pnl_usd,
+                "total_intents": 1,
+                "total_orders_allowed": 0,
+                "total_orders_blocked": 1,
+            }
+
+        fill_result = self.paper_adapter.submit_order(
+            order_id=f"backtest-order-{index:08d}-{leg_index}",
+            intent=intent,
+            order_type="limit",
+            market=market,
+        )
+        fills.append(self._serialize_fill(fill_result, intent.model_prob, intent.side))
+        if fill_result.fill_qty > 0:
+            current_exposure_usd, daily_realized_pnl_usd = self._apply_fill_pnl(
+                fill_result,
+                market,
+                current_exposure_usd,
+                daily_realized_pnl_usd,
+                daily_pnl_by_date,
+            )
+            if position is not None:
+                open_positions.pop(market.ticker, None)
+            elif (
+                market.yes_bid is not None
+                and market.yes_ask is not None
+                and features.price_momentum_1h is not None
+            ):
+                open_positions[market.ticker] = EventDriftPosition(
+                    ticker=market.ticker,
+                    side=intent.side,
+                    entry_price=fill_result.fill_price,
+                    entry_mid_price=(market.yes_bid + market.yes_ask) / 2,
+                    entry_momentum=features.price_momentum_1h,
                     qty=fill_result.fill_qty,
                     opened_at=market.timestamp,
                 )

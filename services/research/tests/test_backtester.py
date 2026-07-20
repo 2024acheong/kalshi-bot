@@ -10,6 +10,7 @@ import pytest
 from core.execution.adapters import PaperAdapter
 from core.risk.engine import OrderIntent, RiskConfig, RiskEngine
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
+from core.strategies.event_drift import EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureStrategy
 from research.backtester import Backtester, BacktestConfig
@@ -176,6 +177,53 @@ def test_backtest_tracks_mean_reversion_entry_and_exit(monkeypatch) -> None:
     assert result["total_intents"] == 2
     assert result["total_orders_allowed"] == 2
     assert [fill["side"] for fill in result["fills"]] == ["no", "yes"]
+
+
+def test_backtest_tracks_event_drift_entry_and_exit(monkeypatch) -> None:
+    snapshots = [
+        make_market(
+            index=0,
+            yes_bid=Decimal("0.49"),
+            yes_ask=Decimal("0.51"),
+        ),
+        make_market(
+            index=1,
+            yes_bid=Decimal("0.50"),
+            yes_ask=Decimal("0.52"),
+        ),
+    ]
+    patch_loader(monkeypatch, snapshots)
+
+    def feature_for(market: MarketState, history: list[MarketState]) -> FeatureVector:
+        momentum = 0.05 if market.raw_sequence == 0 else 0.01
+        return FeatureVector(
+            ticker="KXTEST-26JAN-YES",
+            timestamp=market.timestamp,
+            mid_price=0.50,
+            spread_pct=4.0,
+            spread_ticks=0.02,
+            bid_ask_imbalance=0.3,
+            time_to_close_hours=24.0,
+            implied_probability=0.50,
+            liquidity_score=100.0,
+            price_momentum_1h=momentum,
+            price_momentum_24h=None,
+            volume_zscore=2.0,
+            open_interest_delta=None,
+        )
+
+    monkeypatch.setattr("research.backtester.compute_features", feature_for)
+
+    result = Backtester(
+        EventDriftStrategy(),
+        RiskEngine(),
+        PaperAdapter(),
+        make_config(),
+    ).run()
+
+    assert result["total_intents"] == 2
+    assert result["total_orders_allowed"] == 2
+    assert [fill["side"] for fill in result["fills"]] == ["yes", "no"]
 
 
 def test_backtest_blocks_via_risk_engine(monkeypatch) -> None:
