@@ -100,6 +100,30 @@ def test_kelly_blocks_low_edge():
     assert result.gate == "kelly"
 
 
+def test_kelly_gate_bypassed_for_closing_orders():
+    result = check_kelly(
+        make_intent(estimated_edge=0.01, is_closing_order=True),
+        make_market(),
+        make_features(),
+        RiskConfig(),
+    )
+
+    assert result.decision == RiskDecision.ALLOW
+    assert result.reason == "closing_order_kelly_bypassed"
+
+
+def test_kelly_gate_still_blocks_non_closing_low_edge():
+    result = check_kelly(
+        make_intent(estimated_edge=0.01),
+        make_market(),
+        make_features(),
+        RiskConfig(),
+    )
+
+    assert result.decision == RiskDecision.BLOCK
+    assert result.reason == "edge_below_minimum"
+
+
 def test_kelly_allows_sufficient_edge():
     result = check_kelly(
         make_intent(estimated_edge=0.08),

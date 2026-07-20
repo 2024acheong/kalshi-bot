@@ -10,11 +10,13 @@ from core.execution.adapters import FillResult
 from core.features.compute import compute_features
 from core.risk.engine import OrderIntent, RiskEngineResult, RiskGateResult
 from core.schemas.market import (
+    FeatureVector,
     MarketState,
     MarketStatus,
     OrderIntentStatus,
     RiskDecision,
 )
+from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
 from worker.runtime import TradingRuntime
 from worker.strategies.dummy import DummyStrategy
@@ -224,6 +226,96 @@ async def test_runtime_processes_spread_capture_pair(monkeypatch) -> None:
     open_orders = runtime._resting_orders.get_open_orders()
     assert [order.order_id for order in open_orders] == ["yes-order", "no-order"]
     assert {order.pair_id for order in open_orders} == {"pair-1"}
+
+
+@pytest.mark.anyio
+async def test_runtime_opens_mean_reversion_position(monkeypatch) -> None:
+    market = make_market(yes_bid=Decimal("0.49"), yes_ask=Decimal("0.51"))
+    features = FeatureVector(
+        ticker=market.ticker,
+        timestamp=market.timestamp,
+        mid_price=0.50,
+        spread_pct=4.0,
+        spread_ticks=0.02,
+        bid_ask_imbalance=0.0,
+        time_to_close_hours=24.0,
+        implied_probability=0.50,
+        liquidity_score=100.0,
+        price_momentum_1h=0.05,
+        price_momentum_24h=None,
+        volume_zscore=0.0,
+        open_interest_delta=None,
+    )
+    monkeypatch.setattr("worker.runtime.compute_features", lambda market, history: features)
+    risk_engine = MagicMock()
+    risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
+        intent, RiskDecision.ALLOW
+    )
+    fill_result = FillResult(
+        order_id="order-1",
+        fill_price=Decimal("0.49"),
+        fill_qty=10,
+        fee=Decimal("0.17"),
+        fill_latency_ms=200,
+        fill_type="paper",
+        status=OrderIntentStatus.FILLED,
+    )
+    paper_adapter = MagicMock()
+    paper_adapter.submit_order.return_value = fill_result
+    monkeypatch.setattr("worker.runtime.persist_order", MagicMock(return_value="order-1"))
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+
+    runtime = make_runtime(
+        strategy=MeanReversionStrategy(),
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+    )
+    await runtime.on_market_update(market)
+
+    position = runtime._open_positions[market.ticker]
+    assert position.side == "no"
+    assert position.entry_price == Decimal("0.49")
+    assert position.qty == 10
+
+
+@pytest.mark.anyio
+async def test_runtime_closes_mean_reversion_position(monkeypatch) -> None:
+    market = make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"))
+    risk_engine = MagicMock()
+    risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
+        intent, RiskDecision.ALLOW
+    )
+    fill_result = FillResult(
+        order_id="order-2",
+        fill_price=Decimal("0.49"),
+        fill_qty=10,
+        fee=Decimal("0.17"),
+        fill_latency_ms=200,
+        fill_type="paper",
+        status=OrderIntentStatus.FILLED,
+    )
+    paper_adapter = MagicMock()
+    paper_adapter.submit_order.return_value = fill_result
+    monkeypatch.setattr("worker.runtime.persist_order", MagicMock(return_value="order-2"))
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+
+    runtime = make_runtime(
+        strategy=MeanReversionStrategy(),
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+    )
+    runtime._open_positions[market.ticker] = MeanReversionPosition(
+        ticker=market.ticker,
+        side="no",
+        entry_price=Decimal("0.49"),
+        entry_mid_price=Decimal("0.50"),
+        entry_spread_ticks=Decimal("0.02"),
+        qty=10,
+        opened_at=market.timestamp,
+    )
+    await runtime.on_market_update(market)
+
+    assert market.ticker not in runtime._open_positions
 
 
 @pytest.mark.anyio

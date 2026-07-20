@@ -18,6 +18,7 @@ class OrderIntent:
     model_prob: float
     run_id: str
     signal_id: str | None = None
+    is_closing_order: bool = False
 
 
 @dataclass
@@ -77,7 +78,16 @@ def check_kelly(
         "kelly_qty": kelly_qty,
         "estimated_edge": intent.estimated_edge,
         "min_edge_to_trade": config.min_edge_to_trade,
+        "is_closing_order": intent.is_closing_order,
     }
+
+    if intent.is_closing_order:
+        return RiskGateResult(
+            gate="kelly",
+            decision=RiskDecision.ALLOW,
+            reason="closing_order_kelly_bypassed",
+            metadata=metadata,
+        )
 
     if intent.estimated_edge < config.min_edge_to_trade:
         return RiskGateResult(
@@ -303,6 +313,13 @@ class RiskEngine:
         kill_switch_active: bool = False,
         global_kill_switch: bool = False,
     ) -> RiskEngineResult:
+        """
+        Evaluate an order against every configured risk gate.
+
+        Closing orders bypass the Kelly gate's edge threshold because exits are
+        about reducing or unwinding an existing position, not opening a new edge
+        signal. All other gates still run normally for closing orders.
+        """
         gate_results: list[RiskGateResult] = []
         final_decision = RiskDecision.ALLOW
         approved_qty = intent.qty
