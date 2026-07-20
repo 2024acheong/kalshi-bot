@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from core.execution.adapters import FillResult, PaperAdapter
+from core.execution.resting_orders import RestingOrderBook
 from core.features.compute import compute_features
 from core.risk.engine import OrderIntent, RiskEngine
 from core.schemas.market import MarketState, OrderIntentStatus, RiskDecision
@@ -37,6 +38,7 @@ class Backtester:
         self.paper_adapter = paper_adapter
         self.config = config
         self._make_adapter_replay_safe()
+        self.resting_orders = RestingOrderBook(paper_adapter=self.paper_adapter)
 
     def run(self) -> dict[str, Any]:
         snapshots_by_ticker = data_loader.load_snapshots(
@@ -64,12 +66,41 @@ class Backtester:
             del history[self.config.history_window :]
 
             features = compute_features(replay_market, history=history[: self.config.history_window])
+            resting_events = self.resting_orders.check_tick(
+                replay_market,
+                as_of=replay_market.timestamp,
+            )
+            for order, fill_result in resting_events:
+                fill = self._serialize_fill(
+                    fill_result,
+                    order.intent.model_prob,
+                    order.intent.side,
+                )
+                fills.append(fill)
+                if (
+                    fill_result.status != OrderIntentStatus.CANCELLED
+                    and fill_result.fill_qty > 0
+                ):
+                    current_exposure_usd, daily_realized_pnl_usd = self._apply_fill_pnl(
+                        fill_result,
+                        replay_market,
+                        current_exposure_usd,
+                        daily_realized_pnl_usd,
+                        daily_pnl_by_date,
+                    )
+                if order.pair_id and fill_result.status == OrderIntentStatus.FILLED:
+                    self.resting_orders.cancel_pair(order.pair_id)
+
             intent = self.strategy.evaluate(replay_market, features, run_id="backtest")
             if intent is None:
                 continue
 
             total_intents += 1
-            order_intents = self._order_intents(intent)
+            if isinstance(intent, SpreadCaptureIntent):
+                order_intents = self._order_intents(intent)
+            else:
+                order_intents = [intent]
+
             for leg_index, order_intent in enumerate(order_intents, start=1):
                 risk_result = self.risk_engine.evaluate(
                     intent=order_intent,
@@ -95,6 +126,16 @@ class Backtester:
                     continue
 
                 total_orders_allowed += 1
+                if isinstance(intent, SpreadCaptureIntent):
+                    self.resting_orders.add_order(
+                        intent=order_intent,
+                        max_resting_seconds=intent.max_resting_seconds,
+                        as_of=replay_market.timestamp,
+                        pair_id=intent.pair_id,
+                        order_id=f"backtest-order-{index:08d}-{leg_index}",
+                    )
+                    continue
+
                 fill_result = self.paper_adapter.submit_order(
                     order_id=f"backtest-order-{index:08d}-{leg_index}",
                     intent=order_intent,
@@ -110,12 +151,13 @@ class Backtester:
                     fill_result.status != OrderIntentStatus.CANCELLED
                     and fill_result.fill_qty > 0
                 ):
-                    notional = fill_result.fill_qty * float(fill_result.fill_price)
-                    fee = float(fill_result.fee)
-                    current_exposure_usd += notional
-                    pnl_proxy = notional - fee
-                    daily_realized_pnl_usd += pnl_proxy
-                    daily_pnl_by_date[replay_market.timestamp.date().isoformat()] += pnl_proxy
+                    current_exposure_usd, daily_realized_pnl_usd = self._apply_fill_pnl(
+                        fill_result,
+                        replay_market,
+                        current_exposure_usd,
+                        daily_realized_pnl_usd,
+                        daily_pnl_by_date,
+                    )
 
         daily_pnl_series = [daily_pnl_by_date[date] for date in sorted(daily_pnl_by_date)]
         metrics = compute_metrics(fills, daily_pnl_series)
@@ -178,6 +220,22 @@ class Backtester:
             "side": side,
             "model_prob": model_prob,
         }
+
+    def _apply_fill_pnl(
+        self,
+        fill_result: FillResult,
+        market: MarketState,
+        current_exposure_usd: float,
+        daily_realized_pnl_usd: float,
+        daily_pnl_by_date: dict[str, float],
+    ) -> tuple[float, float]:
+        notional = fill_result.fill_qty * float(fill_result.fill_price)
+        fee = float(fill_result.fee)
+        current_exposure_usd += notional
+        pnl_proxy = notional - fee
+        daily_realized_pnl_usd += pnl_proxy
+        daily_pnl_by_date[market.timestamp.date().isoformat()] += pnl_proxy
+        return current_exposure_usd, daily_realized_pnl_usd
 
     def _serialize_blocked_order(
         self,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -207,18 +207,23 @@ async def test_runtime_processes_spread_capture_pair(monkeypatch) -> None:
     )
     strategy = MagicMock()
     strategy.evaluate.return_value = pair
-    process_intent = AsyncMock()
+    risk_engine = MagicMock()
+    risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
+        intent, RiskDecision.ALLOW
+    )
+    persist_order = MagicMock(side_effect=["yes-order", "no-order"])
+    persist_fill = MagicMock()
+    monkeypatch.setattr("worker.runtime.persist_order", persist_order)
+    monkeypatch.setattr("worker.runtime.persist_fill", persist_fill)
 
-    runtime = make_runtime(strategy=strategy)
-    monkeypatch.setattr(runtime, "_process_intent", process_intent)
+    runtime = make_runtime(strategy=strategy, risk_engine=risk_engine)
     await runtime.on_market_update(market)
 
-    assert process_intent.await_count == 2
-    first_call, second_call = process_intent.await_args_list
-    assert first_call.args[0] == yes_intent
-    assert first_call.args[1] == market
-    assert second_call.args[0] == no_intent
-    assert second_call.args[1] == market
+    assert persist_order.call_count == 2
+    persist_fill.assert_not_called()
+    open_orders = runtime._resting_orders.get_open_orders()
+    assert [order.order_id for order in open_orders] == ["yes-order", "no-order"]
+    assert {order.pair_id for order in open_orders} == {"pair-1"}
 
 
 @pytest.mark.anyio

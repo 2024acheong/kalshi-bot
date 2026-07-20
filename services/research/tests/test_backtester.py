@@ -105,11 +105,19 @@ def test_backtest_produces_fills_on_favorable_conditions(monkeypatch) -> None:
 def test_backtest_handles_spread_capture_pair(monkeypatch) -> None:
     snapshots = [
         make_market(
+            index=0,
             yes_bid=Decimal("0.40"),
             yes_ask=Decimal("0.46"),
             yes_bid_size=100,
             yes_ask_size=100,
-        )
+        ),
+        make_market(
+            index=1,
+            yes_bid=Decimal("0.47"),
+            yes_ask=Decimal("0.39"),
+            yes_bid_size=100,
+            yes_ask_size=100,
+        ),
     ]
     patch_loader(monkeypatch, snapshots)
 
