@@ -275,6 +275,23 @@ def test_full_engine_blocks_at_kelly():
     assert len(result.gate_results) == 1
 
 
+def test_market_making_edge_needs_strategy_specific_kelly_floor():
+    context = make_context(
+        intent=make_intent(estimated_edge=0.005),
+        current_exposure_usd=0.0,
+    )
+
+    default_result = RiskEngine().evaluate(**context)
+    override_result = RiskEngine(
+        config=RiskConfig(min_edge_to_trade=0.003)
+    ).evaluate(**context)
+
+    assert default_result.decision == RiskDecision.BLOCK
+    assert default_result.blocked_by == "kelly"
+    assert override_result.decision == RiskDecision.ALLOW
+    assert override_result.blocked_by is None
+
+
 def test_full_engine_blocks_at_drawdown():
     result = RiskEngine().evaluate(**make_context(kill_switch_active=True))
 

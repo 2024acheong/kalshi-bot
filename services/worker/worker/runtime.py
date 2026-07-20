@@ -6,6 +6,7 @@ from core.execution.adapters import PaperAdapter
 from core.features.compute import compute_features
 from core.risk.engine import OrderIntent, RiskEngine
 from core.schemas.market import FeatureVector, MarketState, RiskDecision
+from core.strategies.spread_capture import SpreadCaptureIntent
 from worker.execution_repository import persist_fill, persist_order
 from worker.monitoring import emit_alert
 
@@ -53,7 +54,26 @@ class TradingRuntime:
         if intent is None:
             return
 
+        if isinstance(intent, SpreadCaptureIntent):
+            await self._process_spread_capture_intent(intent, market, features)
+            return
+
         await self._process_intent(intent, market, features)
+
+    async def _process_spread_capture_intent(
+        self,
+        pair: SpreadCaptureIntent,
+        market: MarketState,
+        features: FeatureVector,
+    ) -> None:
+        await self._process_intent(pair.yes_intent, market, features)
+        await self._process_intent(pair.no_intent, market, features)
+        logger.info(
+            "Spread capture pair %s: yes_order and no_order both submitted",
+            pair.pair_id,
+        )
+        # TODO: implement pair cancellation if one leg is unfilled after
+        # pair.max_resting_seconds once open-order lifecycle tracking exists.
 
     async def _process_intent(
         self,
