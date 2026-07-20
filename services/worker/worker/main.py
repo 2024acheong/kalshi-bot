@@ -7,13 +7,13 @@ import os
 from dotenv import load_dotenv
 
 from core.execution.adapters import PaperAdapter
-from core.risk.engine import RiskEngine
+from core.risk.engine import RiskConfig, RiskEngine
+from core.strategies.spread_capture import SpreadCaptureStrategy
 from worker.config import WorkerSettings
 from worker.command_listener import CommandListener
 from worker.execution_repository import create_strategy_run, ensure_strategy_config
 from worker.runtime import TradingRuntime
 from worker.service import build_runtime
-from worker.strategies.dummy import DummyStrategy
 
 
 load_dotenv()
@@ -25,16 +25,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 HARDCODED_CRYPTO_TICKERS = [
-    "KXBTCD-26JUL1917-T64499.99",
-    "KXBTCD-26JUL1917-T63999.99",
-    "KXBTCD-26JUL1917-T63749.99",
-    "KXBTCD-26JUL1917-T64749.99",
-    "KXBTCD-26JUL1917-T64249.99",
+    "KXBTCD-26JUL2017-T64999.99",
+    "KXBTCD-26JUL2017-T65749.99",
 ]
 
 
+def build_spread_capture_risk_engine() -> RiskEngine:
+    # Spread capture edge is the market-making spread itself, not a directional
+    # mispricing estimate. Comparing it against the stricter directional 3%
+    # threshold is a category error, so this strategy gets its own Kelly floor.
+    spread_capture_risk_config = RiskConfig(
+        min_edge_to_trade=0.003,
+        kelly_fraction=0.5,
+    )
+    return RiskEngine(config=spread_capture_risk_config)
+
+
 async def main() -> None:
-    config_id = ensure_strategy_config(name="dummy_strategy", version=1, params={})
+    config_id = ensure_strategy_config(name="spread_capture", version=1, params={})
     run_id = create_strategy_run(config_id=config_id, mode="paper")
     logger.info("Created strategy_run: %s (config: %s)", run_id, config_id)
     logger.info("Starting trading runtime - run_id=%s", run_id)
@@ -46,8 +54,8 @@ async def main() -> None:
     runtime = TradingRuntime(
         run_id=run_id,
         tickers=watched_tickers,
-        strategy=DummyStrategy(),
-        risk_engine=RiskEngine(),
+        strategy=SpreadCaptureStrategy(),
+        risk_engine=build_spread_capture_risk_engine(),
         paper_adapter=PaperAdapter(),
     )
     ingestion = await build_runtime(

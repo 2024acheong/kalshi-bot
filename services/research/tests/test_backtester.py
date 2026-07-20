@@ -10,6 +10,7 @@ import pytest
 from core.execution.adapters import PaperAdapter
 from core.risk.engine import OrderIntent, RiskEngine
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
+from core.strategies.spread_capture import SpreadCaptureStrategy
 from research.backtester import Backtester, BacktestConfig
 from research.metrics import BacktestMetrics, compute_metrics
 from worker.strategies.dummy import DummyStrategy
@@ -101,6 +102,30 @@ def test_backtest_produces_fills_on_favorable_conditions(monkeypatch) -> None:
     assert result["metrics"].total_trades >= 1
 
 
+def test_backtest_handles_spread_capture_pair(monkeypatch) -> None:
+    snapshots = [
+        make_market(
+            yes_bid=Decimal("0.40"),
+            yes_ask=Decimal("0.46"),
+            yes_bid_size=100,
+            yes_ask_size=100,
+        )
+    ]
+    patch_loader(monkeypatch, snapshots)
+
+    result = Backtester(
+        SpreadCaptureStrategy(),
+        RiskEngine(),
+        PaperAdapter(),
+        make_config(),
+    ).run()
+
+    assert result["total_intents"] == 1
+    assert result["total_orders_allowed"] == 2
+    assert len(result["fills"]) == 2
+    assert {fill["side"] for fill in result["fills"]} == {"yes", "no"}
+
+
 def test_backtest_blocks_via_risk_engine(monkeypatch) -> None:
     snapshots = [make_market()]
     patch_loader(monkeypatch, snapshots)
@@ -110,6 +135,8 @@ def test_backtest_blocks_via_risk_engine(monkeypatch) -> None:
     assert result["total_intents"] == 1
     assert result["total_orders_blocked"] == 1
     assert result["fills"] == []
+    assert result["blocked_orders"][0]["blocked_by"] == "kelly"
+    assert result["blocked_orders"][0]["reason"] == "edge_below_minimum"
 
 
 def test_metrics_computation_basic() -> None:

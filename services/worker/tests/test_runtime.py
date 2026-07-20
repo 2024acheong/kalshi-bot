@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -15,6 +15,7 @@ from core.schemas.market import (
     OrderIntentStatus,
     RiskDecision,
 )
+from core.strategies.spread_capture import SpreadCaptureIntent
 from worker.runtime import TradingRuntime
 from worker.strategies.dummy import DummyStrategy
 
@@ -191,6 +192,33 @@ async def test_runtime_processes_allowed_intent(monkeypatch) -> None:
     persist_fill.assert_called_once_with("order-1", fill_result)
     paper_adapter.submit_order.assert_called_once()
     assert runtime._current_exposure_usd == 4.8
+
+
+@pytest.mark.anyio
+async def test_runtime_processes_spread_capture_pair(monkeypatch) -> None:
+    market = make_market()
+    yes_intent = make_intent(side="yes", price=Decimal("0.46"))
+    no_intent = make_intent(side="no", price=Decimal("0.48"))
+    pair = SpreadCaptureIntent(
+        yes_intent=yes_intent,
+        no_intent=no_intent,
+        pair_id="pair-1",
+        max_resting_seconds=30,
+    )
+    strategy = MagicMock()
+    strategy.evaluate.return_value = pair
+    process_intent = AsyncMock()
+
+    runtime = make_runtime(strategy=strategy)
+    monkeypatch.setattr(runtime, "_process_intent", process_intent)
+    await runtime.on_market_update(market)
+
+    assert process_intent.await_count == 2
+    first_call, second_call = process_intent.await_args_list
+    assert first_call.args[0] == yes_intent
+    assert first_call.args[1] == market
+    assert second_call.args[0] == no_intent
+    assert second_call.args[1] == market
 
 
 @pytest.mark.anyio
