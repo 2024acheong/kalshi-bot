@@ -16,6 +16,7 @@ from core.schemas.market import (
     OrderIntentStatus,
     RiskDecision,
 )
+from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
 from worker.runtime import TradingRuntime
@@ -313,6 +314,89 @@ async def test_runtime_closes_mean_reversion_position(monkeypatch) -> None:
         qty=10,
         opened_at=market.timestamp,
     )
+    await runtime.on_market_update(market)
+
+    assert market.ticker not in runtime._open_positions
+
+
+@pytest.mark.anyio
+async def test_runtime_opens_and_closes_event_drift_position(monkeypatch) -> None:
+    market = make_market(yes_bid=Decimal("0.49"), yes_ask=Decimal("0.51"))
+    entry_features = FeatureVector(
+        ticker=market.ticker,
+        timestamp=market.timestamp,
+        mid_price=0.50,
+        spread_pct=4.0,
+        spread_ticks=0.02,
+        bid_ask_imbalance=0.3,
+        time_to_close_hours=24.0,
+        implied_probability=0.50,
+        liquidity_score=100.0,
+        price_momentum_1h=0.05,
+        price_momentum_24h=None,
+        volume_zscore=2.0,
+        open_interest_delta=None,
+    )
+    exit_features = FeatureVector(
+        ticker=market.ticker,
+        timestamp=market.timestamp,
+        mid_price=0.50,
+        spread_pct=4.0,
+        spread_ticks=0.02,
+        bid_ask_imbalance=0.3,
+        time_to_close_hours=24.0,
+        implied_probability=0.50,
+        liquidity_score=100.0,
+        price_momentum_1h=0.01,
+        price_momentum_24h=None,
+        volume_zscore=2.0,
+        open_interest_delta=None,
+    )
+    compute_features_mock = MagicMock(side_effect=[entry_features, exit_features])
+    monkeypatch.setattr("worker.runtime.compute_features", compute_features_mock)
+    risk_engine = MagicMock()
+    risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
+        intent, RiskDecision.ALLOW
+    )
+    paper_adapter = MagicMock()
+    paper_adapter.submit_order.side_effect = [
+        FillResult(
+            order_id="order-1",
+            fill_price=Decimal("0.51"),
+            fill_qty=10,
+            fee=Decimal("0.17"),
+            fill_latency_ms=200,
+            fill_type="paper",
+            status=OrderIntentStatus.FILLED,
+        ),
+        FillResult(
+            order_id="order-2",
+            fill_price=Decimal("0.49"),
+            fill_qty=10,
+            fee=Decimal("0.17"),
+            fill_latency_ms=200,
+            fill_type="paper",
+            status=OrderIntentStatus.FILLED,
+        ),
+    ]
+    monkeypatch.setattr(
+        "worker.runtime.persist_order",
+        MagicMock(side_effect=["order-1", "order-2"]),
+    )
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+
+    runtime = make_runtime(
+        strategy=EventDriftStrategy(),
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+    )
+    await runtime.on_market_update(market)
+
+    position = runtime._open_positions[market.ticker]
+    assert isinstance(position, EventDriftPosition)
+    assert position.side == "yes"
+    assert position.entry_momentum == 0.05
+
     await runtime.on_market_update(market)
 
     assert market.ticker not in runtime._open_positions
