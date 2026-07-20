@@ -28,6 +28,17 @@ class SimulationConfig:
     staleness_threshold_ms: int = 5000
 
 
+def check_limit_crossed(intent: OrderIntent, market: MarketState) -> bool:
+    """Return True if the market has moved such that this limit order would fill."""
+    if intent.side == "yes":
+        return market.yes_ask is not None and market.yes_ask <= intent.price
+
+    if intent.side == "no":
+        return market.yes_bid is not None and market.yes_bid >= intent.price
+
+    return False
+
+
 class BaseExecutionAdapter(ABC):
     @abstractmethod
     def submit_order(
@@ -95,15 +106,14 @@ class PaperAdapter(BaseExecutionAdapter):
         return None
 
     def _limit_fill_price(self, intent: OrderIntent, market: MarketState) -> Decimal | None:
-        if intent.side == "yes":
-            if market.yes_ask is not None and market.yes_ask <= intent.price:
-                return market.yes_ask
+        if not check_limit_crossed(intent, market):
             return None
 
+        if intent.side == "yes":
+            return market.yes_ask
+
         if intent.side == "no":
-            if market.yes_bid is not None and market.yes_bid >= intent.price:
-                return market.yes_bid
-            return None
+            return market.yes_bid
 
         return None
 
