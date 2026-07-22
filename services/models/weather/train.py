@@ -29,6 +29,9 @@ _TITLE_LESS_RE = re.compile(r"<\s*(?P<threshold>-?\d+(?:\.\d+)?)")
 _TITLE_BETWEEN_RE = re.compile(
     r"(?P<lower>-?\d+(?:\.\d+)?)\s*-\s*(?P<upper>-?\d+(?:\.\d+)?)\s*°"
 )
+_CITY_ALIASES = {
+    "NYC": "NY",
+}
 
 
 def _parse_datetime(value: Any) -> datetime:
@@ -62,6 +65,11 @@ def _parse_date(value: Any) -> date:
 def _parse_market_for_training(ticker: str) -> dict[str, Any] | None:
     parser = WeatherEnsembleEstimator.__new__(WeatherEnsembleEstimator)
     return parser._parse_ticker(ticker)
+
+
+def _canonical_city_code(city_code: Any) -> str:
+    normalized = str(city_code).upper()
+    return _CITY_ALIASES.get(normalized, normalized)
 
 
 def _label_from_title(title: str, actual_temp_f: float) -> tuple[int, float] | None:
@@ -102,11 +110,12 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
     )
     outcomes = getattr(outcomes_response, "data", None) or []
     if not outcomes:
+        LOGGER.warning("No actual_temperature_outcomes rows available for real training.")
         return None
 
     outcome_by_city_date: dict[tuple[str, date], dict[str, Any]] = {}
     for row in outcomes:
-        key = (str(row["city_code"]).upper(), _parse_date(row["outcome_date"]))
+        key = (_canonical_city_code(row["city_code"]), _parse_date(row["outcome_date"]))
         outcome_by_city_date[key] = row
 
     markets_response = (
@@ -117,15 +126,19 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
     )
     markets = getattr(markets_response, "data", None) or []
     candidate_markets: list[tuple[dict[str, Any], str, str, int, float]] = []
+    parsed_weather_markets = 0
+    markets_with_outcomes = 0
     for market in markets:
         parsed = _parse_market_for_training(str(market["ticker"]))
         if parsed is None:
             continue
+        parsed_weather_markets += 1
         outcome = outcome_by_city_date.get(
-            (str(parsed["city_code"]).upper(), parsed["target_date"])
+            (_canonical_city_code(parsed["city_code"]), parsed["target_date"])
         )
         if outcome is None:
             continue
+        markets_with_outcomes += 1
         temp_key = "high_temp_f" if str(parsed["kind"]).upper() == "HIGH" else "low_temp_f"
         actual_temp = outcome.get(temp_key)
         if actual_temp is None:
@@ -145,6 +158,13 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
         )
 
     if not candidate_markets:
+        LOGGER.warning(
+            "No weather markets could be labeled from outcomes "
+            "(outcomes=%s, parsed_weather_markets=%s, markets_with_outcomes=%s).",
+            len(outcomes),
+            parsed_weather_markets,
+            markets_with_outcomes,
+        )
         return None
 
     snapshot_response = (
@@ -185,12 +205,13 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
                 member,
                 max(temperatures),
                 min(temperatures),
-                issued_by_group[(lat, lon, target_date, issued_raw)],
+                issued_by_group[(lat, lon, target_date, issued_raw, member)],
             )
         )
 
     x_rows: list[list[float]] = []
     y_rows: list[int] = []
+    candidate_forecast_matches = 0
     for parsed, _ticker, _title, label_value, threshold_f in candidate_markets:
         target_date = parsed["target_date"]
         threshold_c = fahrenheit_to_celsius(threshold_f)
@@ -201,6 +222,7 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
                 or forecast_date != target_date
             ):
                 continue
+            candidate_forecast_matches += 1
             kind = str(parsed["kind"]).upper()
             daily_values = [
                 high_value if kind == "HIGH" else low_value
@@ -234,7 +256,10 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
     if len(set(y_rows)) < 2 or len(y_rows) < 10:
         LOGGER.warning(
             "Real outcome training data is present but insufficient "
-            "(rows=%s, classes=%s); falling back to synthetic placeholder.",
+            "(candidate_markets=%s, forecast_matches=%s, rows=%s, classes=%s); "
+            "falling back to synthetic placeholder.",
+            len(candidate_markets),
+            candidate_forecast_matches,
             len(y_rows),
             sorted(set(y_rows)),
         )
