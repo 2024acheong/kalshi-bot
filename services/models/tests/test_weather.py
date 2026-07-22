@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
 from services.models.shared.artifact_store import save_artifact
-from services.models.weather.outcomes import parse_nws_cli_outcome
 from services.models.weather.estimator import WeatherEnsembleEstimator, compute_ensemble_features
-from services.models.weather.train import _label_from_title
+from services.models.weather.outcomes import (
+    chunk_date_range_by_year,
+    parse_ncei_daily_summary_outcome,
+    parse_nws_cli_outcome,
+    store_temperature_outcome,
+)
+from services.models.weather.train import _canonical_city_code, _label_from_title
 
 
 def make_market(ticker: str) -> MarketState:
@@ -130,10 +135,99 @@ TEMPERATURE (F)
     assert outcome.source_product_id == "abc123"
 
 
+def test_parse_ncei_daily_summary_outcome_extracts_standard_unit_temperatures() -> None:
+    row = {"DATE": "2026-05-21", "TMAX": "75", "TMIN": "68"}
+
+    outcome = parse_ncei_daily_summary_outcome(row, "NYC", "USW00094728")
+
+    assert outcome is not None
+    assert outcome.city_code == "NYC"
+    assert outcome.station_id == "USW00094728"
+    assert outcome.outcome_date == date(2026, 5, 21)
+    assert outcome.high_temp_f == pytest.approx(75)
+    assert outcome.low_temp_f == pytest.approx(68)
+    assert outcome.source == "ncei_daily_summaries"
+    assert outcome.source_product_id == "ncei:daily-summaries:USW00094728"
+
+
+def test_parse_ncei_daily_summary_outcome_allows_one_missing_temperature() -> None:
+    row = {"DATE": "2026-05-21", "TMAX": "75"}
+
+    outcome = parse_ncei_daily_summary_outcome(row, "NYC", "USW00094728")
+
+    assert outcome is not None
+    assert outcome.high_temp_f == pytest.approx(75)
+    assert outcome.low_temp_f is None
+
+
+def test_chunk_date_range_by_year_splits_multi_year_ranges() -> None:
+    chunks = chunk_date_range_by_year(date(2024, 12, 30), date(2026, 1, 2))
+
+    assert chunks == [
+        (date(2024, 12, 30), date(2024, 12, 31)),
+        (date(2025, 1, 1), date(2025, 12, 31)),
+        (date(2026, 1, 1), date(2026, 1, 2)),
+    ]
+
+
+def test_chunk_date_range_by_year_rejects_invalid_ranges() -> None:
+    with pytest.raises(ValueError, match="start_date"):
+        chunk_date_range_by_year(date(2026, 1, 2), date(2026, 1, 1))
+
+
+def test_store_temperature_outcome_uses_outcome_source(monkeypatch) -> None:
+    class FakeExecute:
+        data = [{"id": 1}]
+
+    class FakeTable:
+        def __init__(self) -> None:
+            self.payload = None
+            self.conflict = None
+
+        def upsert(self, payload, on_conflict):
+            self.payload = payload
+            self.conflict = on_conflict
+            return self
+
+        def execute(self):
+            return FakeExecute()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.table_name = None
+            self.table_obj = FakeTable()
+
+        def table(self, name):
+            self.table_name = name
+            return self.table_obj
+
+    fake = FakeClient()
+    monkeypatch.setattr("services.models.weather.outcomes.get_supabase_client", lambda: fake)
+    outcome = parse_ncei_daily_summary_outcome(
+        {"DATE": "2026-05-21", "TMAX": "75", "TMIN": "68"},
+        "NYC",
+        "USW00094728",
+    )
+    assert outcome is not None
+
+    assert store_temperature_outcome(outcome) == 1
+
+    assert fake.table_name == "actual_temperature_outcomes"
+    assert fake.table_obj.conflict == "city_code,outcome_date"
+    assert fake.table_obj.payload["source"] == "ncei_daily_summaries"
+    assert fake.table_obj.payload["station_id"] == "USW00094728"
+    assert fake.table_obj.payload["source_product_id"] == "ncei:daily-summaries:USW00094728"
+
+
 def test_label_from_title_handles_greater_less_and_between() -> None:
     assert _label_from_title("Will the **high temp in NYC** be >75°?", 76) == (1, 75)
     assert _label_from_title("Will the **high temp in NYC** be <68°?", 68) == (0, 68)
     assert _label_from_title("Will the **high temp in NYC** be 74-75°?", 75) == (1, 74.5)
+
+
+def test_training_city_alias_matches_nyc_outcomes_to_ny_tickers() -> None:
+    assert _canonical_city_code("NYC") == "NY"
+    assert _canonical_city_code("NY") == "NY"
 
 
 def test_estimator_clips_output_to_valid_range(monkeypatch) -> None:
