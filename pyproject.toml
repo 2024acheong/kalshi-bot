@@ -9,9 +9,11 @@ testpaths = [
   "packages/core/tests",
   "apps/api/tests",
   "services/worker/tests",
-  "services/research/tests"
+  "services/research/tests",
+  "services/models/tests"
 ]
 asyncio_mode = "auto"
+addopts = ["--import-mode=importlib"]
 
 [tool.ruff]
 line-length = 100

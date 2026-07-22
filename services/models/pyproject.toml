@@ -1,0 +1,12 @@
+[project]
+name = "kalshi-models"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "lightgbm>=4.5",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "supabase>=2.4",
+    "python-dotenv>=1.0",
+]
