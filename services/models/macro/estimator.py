@@ -12,9 +12,9 @@ from core.strategies.calibration_mispricing import ProbabilityEstimator
 from services.models.macro.features import (
     MACRO_METRICS,
     clean_observations,
-    compute_trend_features,
+    compute_threshold_model_features,
     derive_metric_observations,
-    feature_dict_to_array,
+    normalize_threshold_for_metric,
 )
 from services.models.shared.artifact_store import load_artifact
 from services.models.shared.model_registry import get_latest_model, get_supabase_client
@@ -97,11 +97,14 @@ class MacroEstimator(ProbabilityEstimator):
             return None
 
         metric = MACRO_METRICS[metric_id]
+        raw_threshold = float(match.group("threshold"))
+        threshold = normalize_threshold_for_metric(metric.metric_id, raw_threshold)
         return {
             "series": series,
             "event_token": match.group("event").upper(),
             "target_date": target_date,
-            "threshold": float(match.group("threshold")),
+            "threshold": threshold,
+            "raw_threshold": raw_threshold,
             "direction": "greater",
             "strike_type": "greater",
             "metric_id": metric.metric_id,
@@ -128,14 +131,14 @@ class MacroEstimator(ProbabilityEstimator):
         rows = self._fetch_series_rows(str(parsed["fred_series_id"]))
         raw_observations = clean_observations(rows)
         metric_observations = derive_metric_observations(raw_observations, str(parsed["metric_id"]))
-        features = compute_trend_features(metric_observations, as_of=as_of)
-        if features is None:
-            return None
-
-        model_features = feature_dict_to_array(features)
-        model_features[0] -= float(parsed["threshold"])
-        model_features[1] -= float(parsed["threshold"])
-        return model_features
+        return compute_threshold_model_features(
+            metric_observations,
+            threshold=float(parsed["threshold"]),
+            cutoff_date=(
+                metric_observations[-1][0] if metric_observations else parsed["target_date"]
+            ),
+            as_of=as_of,
+        )
 
     def _predict_probability(self, model_features: list[float]) -> float:
         values = np.array([model_features], dtype=float)
