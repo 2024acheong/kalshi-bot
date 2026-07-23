@@ -14,6 +14,7 @@ from worker.command_listener import CommandListener
 from worker.execution_repository import (
     ensure_strategy_config,
     get_or_create_strategy_run,
+    load_open_positions,
     load_open_resting_orders,
 )
 from worker.runtime import TradingRuntime
@@ -65,6 +66,13 @@ async def main() -> None:
     restored_orders = load_open_resting_orders(run_id)
     runtime.restore_resting_orders(restored_orders)
     logger.info("Restored %d open resting orders for run_id=%s", len(restored_orders), run_id)
+    restored_positions = load_open_positions(run_id)
+    runtime.restore_positions(restored_positions)
+    logger.info(
+        "Restored %d open positions for run_id=%s",
+        len(restored_positions),
+        run_id,
+    )
     ingestion = await build_runtime(
         settings=WorkerSettings.from_env(),
         watched_tickers=watched_tickers,

@@ -181,6 +181,66 @@ def update_resting_order_state(
     )
 
 
+def persist_open_position(
+    *,
+    run_id: str,
+    ticker: str,
+    side: str,
+    qty: int,
+    avg_entry: Decimal,
+    opened_at: datetime,
+    metadata: dict | None = None,
+) -> str:
+    row = {
+        "run_id": run_id,
+        "ticker": ticker,
+        "side": side,
+        "qty": qty,
+        "avg_entry": str(avg_entry),
+        "unrealized_pnl": "0",
+        "opened_at": opened_at.astimezone(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "metadata_json": metadata or {},
+    }
+    response = (
+        _get_supabase()
+        .table("positions")
+        .upsert(row, on_conflict="run_id,ticker,side")
+        .execute()
+    )
+    return _response_id(response, "positions")
+
+
+def close_position(run_id: str, ticker: str, side: str) -> None:
+    row = {
+        "qty": 0,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    (
+        _get_supabase()
+        .table("positions")
+        .update(row)
+        .eq("run_id", run_id)
+        .eq("ticker", ticker)
+        .eq("side", side)
+        .execute()
+    )
+
+
+def load_open_positions(run_id: str) -> list[dict[str, Any]]:
+    response = (
+        _get_supabase()
+        .table("positions")
+        .select(
+            "run_id,ticker,side,qty,avg_entry,opened_at,metadata_json"
+        )
+        .eq("run_id", run_id)
+        .gt("qty", 0)
+        .execute()
+    )
+    return getattr(response, "data", None) or []
+
+
 def load_open_resting_orders(run_id: str) -> list[RestingOrder]:
     response = (
         _get_supabase()
