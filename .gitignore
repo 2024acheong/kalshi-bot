@@ -12,6 +12,7 @@ build/
 .pytest_cache/
 data/
 services/models/artifacts/
+catboost_info/
 # Python build artifacts
 *.egg-info/
 *.egg
