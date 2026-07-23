@@ -49,6 +49,12 @@ FRED_SERIES_OF_INTEREST: dict[str, str] = {
 }
 
 
+def normalize_threshold_for_metric(metric_id: str, threshold: float) -> float:
+    if metric_id == "payrolls_delta":
+        return threshold / 1000.0
+    return threshold
+
+
 def parse_date(value: Any) -> date:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
@@ -163,3 +169,55 @@ def feature_dict_to_array(features: dict[str, float]) -> list[float]:
         features["months_since_last_release"],
         features["series_volatility"],
     ]
+
+
+def observations_on_or_before(
+    observations: list[tuple[date, float]],
+    cutoff_date: date,
+) -> list[tuple[date, float]]:
+    return [(obs_date, value) for obs_date, value in observations if obs_date <= cutoff_date]
+
+
+def find_metric_value_for_target(
+    metric_observations: list[tuple[date, float]],
+    target_date: date,
+    metric_id: str,
+) -> tuple[date, float] | None:
+    """
+    Find the FRED-derived actual value that maps to a parsed Kalshi target.
+
+    Monthly/quarterly macro tickers usually encode the target period rather
+    than the exact FRED observation date, so match by year/month. Daily Fed
+    target-rate markets fall back to the latest observation on or before the
+    target date.
+    """
+    observations = sorted(metric_observations, key=lambda item: item[0])
+    if metric_id == "fed_upper_bound":
+        candidates = [
+            (obs_date, value)
+            for obs_date, value in observations
+            if obs_date <= target_date
+        ]
+        return candidates[-1] if candidates else None
+
+    for obs_date, value in observations:
+        if obs_date.year == target_date.year and obs_date.month == target_date.month:
+            return obs_date, value
+    return None
+
+
+def compute_threshold_model_features(
+    metric_observations: list[tuple[date, float]],
+    threshold: float,
+    cutoff_date: date,
+    as_of: datetime | date | None = None,
+) -> list[float] | None:
+    historical_observations = observations_on_or_before(metric_observations, cutoff_date)
+    features = compute_trend_features(historical_observations, as_of=as_of or cutoff_date)
+    if features is None:
+        return None
+
+    model_features = feature_dict_to_array(features)
+    model_features[0] -= threshold
+    model_features[1] -= threshold
+    return model_features

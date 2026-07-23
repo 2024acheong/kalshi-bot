@@ -14,9 +14,12 @@ if __package__ in {None, ""}:
 from services.models.macro.features import (
     MACRO_METRICS,
     clean_observations,
+    compute_threshold_model_features,
     compute_trend_features,
     derive_metric_observations,
     feature_dict_to_array,
+    observations_on_or_before,
+    parse_date,
 )
 from services.models.shared.artifact_store import save_artifact
 from services.models.shared.model_registry import get_supabase_client, register_model
@@ -28,6 +31,7 @@ SYNTHETIC_WARNING = (
     "This model is NOT suitable for real trading and must be retrained on "
     "resolved macro outcomes before production use."
 )
+MIN_REAL_TRAINING_ROWS = 50
 
 
 def _load_base_feature_rows() -> list[list[float]]:
@@ -50,6 +54,80 @@ def _load_base_feature_rows() -> list[list[float]]:
             if features is not None:
                 base_rows.append(feature_dict_to_array(features))
     return base_rows
+
+
+def _load_indicator_rows_by_series(fred_series_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
+    client = get_supabase_client()
+    rows_by_series: dict[str, list[dict[str, Any]]] = {}
+    for fred_series_id in fred_series_ids:
+        response = (
+            client.table("macro_indicator_series")
+            .select("observation_date,value")
+            .eq("series_id", fred_series_id)
+            .order("observation_date", desc=False)
+            .limit(5000)
+            .execute()
+        )
+        rows_by_series[fred_series_id] = getattr(response, "data", None) or []
+    return rows_by_series
+
+
+def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    Build real labels from stored macro_market_outcomes.
+
+    Features are computed only from FRED-derived metric observations strictly
+    before the outcome's target observation date to avoid leaking the actual.
+    """
+    response = (
+        get_supabase_client()
+        .table("macro_market_outcomes")
+        .select("ticker,metric_id,fred_series_id,target_date,threshold,yes_resolved")
+        .execute()
+    )
+    outcome_rows = getattr(response, "data", None) or []
+    if not outcome_rows:
+        LOGGER.warning("No macro_market_outcomes rows available for real training.")
+        return None
+
+    rows_by_series = _load_indicator_rows_by_series(
+        {str(row["fred_series_id"]) for row in outcome_rows}
+    )
+    x_rows: list[list[float]] = []
+    y_rows: list[int] = []
+    for row in outcome_rows:
+        fred_series_id = str(row["fred_series_id"])
+        metric_id = str(row["metric_id"])
+        target_date = parse_date(row["target_date"])
+        raw_observations = clean_observations(rows_by_series.get(fred_series_id, []))
+        metric_observations = derive_metric_observations(raw_observations, metric_id)
+        historical_observations = observations_on_or_before(
+            metric_observations,
+            target_date,
+        )
+        if historical_observations and historical_observations[-1][0] == target_date:
+            historical_observations = historical_observations[:-1]
+        features = compute_threshold_model_features(
+            historical_observations,
+            threshold=float(row["threshold"]),
+            cutoff_date=target_date,
+            as_of=target_date,
+        )
+        if features is None:
+            continue
+        x_rows.append(features)
+        y_rows.append(1 if row.get("yes_resolved") else 0)
+
+    if len(x_rows) < MIN_REAL_TRAINING_ROWS or len(set(y_rows)) < 2:
+        LOGGER.warning(
+            "Real macro outcome training data is insufficient "
+            "(rows=%s, classes=%s); falling back to synthetic placeholder.",
+            len(x_rows),
+            sorted(set(y_rows)),
+        )
+        return None
+
+    return np.array(x_rows, dtype=float), np.array(y_rows, dtype=int)
 
 
 def _synthetic_training_rows(base_features: list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
@@ -94,8 +172,8 @@ def train_macro_model() -> dict[str, Any]:
     """
     Train and register a CatBoost macro threshold model.
 
-    This currently uses synthetic placeholder labels because there is no paired
-    resolved Kalshi macro outcome dataset in this service yet.
+    Uses stored macro_market_outcomes when enough real labels exist. Otherwise
+    falls back to the synthetic placeholder pipeline.
     """
     try:
         from catboost import CatBoostClassifier
@@ -112,7 +190,18 @@ def train_macro_model() -> dict[str, Any]:
         LOGGER.warning("Could not load macro_indicator_series; using synthetic base data: %s", exc)
         base_features = []
 
-    x_values, y_values = _synthetic_training_rows(base_features)
+    real_training_rows = None
+    try:
+        real_training_rows = _load_real_training_rows()
+    except Exception as exc:
+        LOGGER.warning("Could not build real macro outcome training rows: %s", exc)
+
+    synthetic_placeholder = real_training_rows is None
+    if real_training_rows is None:
+        x_values, y_values = _synthetic_training_rows(base_features)
+    else:
+        x_values, y_values = real_training_rows
+        LOGGER.info("Training macro model on %s real outcome rows", len(x_values))
     x_train, x_test, y_train, y_test = train_test_split(
         x_values,
         y_values,
@@ -127,8 +216,8 @@ def train_macro_model() -> dict[str, Any]:
     metrics = {
         "accuracy": float(accuracy_score(y_test, probabilities >= 0.5)),
         "log_loss": float(log_loss(y_test, probabilities)),
-        "synthetic_placeholder": True,
-        "warning": SYNTHETIC_WARNING,
+        "synthetic_placeholder": synthetic_placeholder,
+        "warning": SYNTHETIC_WARNING if synthetic_placeholder else None,
         "training_rows": int(len(x_values)),
     }
 
