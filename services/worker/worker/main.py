@@ -11,7 +11,11 @@ from core.risk.engine import RiskConfig, RiskEngine
 from core.strategies.spread_capture import SpreadCaptureStrategy
 from worker.config import WorkerSettings
 from worker.command_listener import CommandListener
-from worker.execution_repository import create_strategy_run, ensure_strategy_config
+from worker.execution_repository import (
+    ensure_strategy_config,
+    get_or_create_strategy_run,
+    load_open_resting_orders,
+)
 from worker.runtime import TradingRuntime
 from worker.service import build_runtime
 
@@ -43,8 +47,8 @@ def build_spread_capture_risk_engine() -> RiskEngine:
 
 async def main() -> None:
     config_id = ensure_strategy_config(name="spread_capture", version=1, params={})
-    run_id = create_strategy_run(config_id=config_id, mode="paper")
-    logger.info("Created strategy_run: %s (config: %s)", run_id, config_id)
+    run_id = get_or_create_strategy_run(config_id=config_id, mode="paper")
+    logger.info("Using strategy_run: %s (config: %s)", run_id, config_id)
     logger.info("Starting trading runtime - run_id=%s", run_id)
     watched_tickers = HARDCODED_CRYPTO_TICKERS
     if not watched_tickers:
@@ -58,6 +62,9 @@ async def main() -> None:
         risk_engine=build_spread_capture_risk_engine(),
         paper_adapter=PaperAdapter(),
     )
+    restored_orders = load_open_resting_orders(run_id)
+    runtime.restore_resting_orders(restored_orders)
+    logger.info("Restored %d open resting orders for run_id=%s", len(restored_orders), run_id)
     ingestion = await build_runtime(
         settings=WorkerSettings.from_env(),
         watched_tickers=watched_tickers,

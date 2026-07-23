@@ -26,17 +26,23 @@ class SimulationConfig:
     fill_latency_ms: int = 200
     slippage_ticks: Decimal = Decimal("0.01")
     staleness_threshold_ms: int = 5000
+    fee_per_contract: Decimal = Decimal("0.07")
+
+
+def check_limit_traded_through(intent: OrderIntent, market: MarketState) -> bool:
+    """Return True only when the market trades through this limit price."""
+    if intent.side == "yes":
+        return market.yes_ask is not None and market.yes_ask < intent.price
+
+    if intent.side == "no":
+        return market.yes_bid is not None and market.yes_bid > intent.price
+
+    return False
 
 
 def check_limit_crossed(intent: OrderIntent, market: MarketState) -> bool:
-    """Return True if the market has moved such that this limit order would fill."""
-    if intent.side == "yes":
-        return market.yes_ask is not None and market.yes_ask <= intent.price
-
-    if intent.side == "no":
-        return market.yes_bid is not None and market.yes_bid >= intent.price
-
-    return False
+    """Backward-compatible alias for through-price paper fill checks."""
+    return check_limit_traded_through(intent, market)
 
 
 class BaseExecutionAdapter(ABC):
@@ -79,7 +85,11 @@ class PaperAdapter(BaseExecutionAdapter):
             if fill_qty < intent.qty
             else OrderIntentStatus.FILLED
         )
-        fee = compute_kalshi_fee(fill_price, fill_qty)
+        fee = compute_kalshi_fee(
+            fill_price,
+            fill_qty,
+            fee_per_contract=self.config.fee_per_contract,
+        )
 
         return FillResult(
             order_id=order_id,
@@ -106,7 +116,7 @@ class PaperAdapter(BaseExecutionAdapter):
         return None
 
     def _limit_fill_price(self, intent: OrderIntent, market: MarketState) -> Decimal | None:
-        if not check_limit_crossed(intent, market):
+        if not check_limit_traded_through(intent, market):
             return None
 
         if intent.side == "yes":

@@ -214,6 +214,47 @@ async def test_runtime_processes_allowed_intent(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_runtime_rests_remainder_after_partial_fill(monkeypatch) -> None:
+    market = make_market()
+    intent = make_intent(qty=100)
+    strategy = MagicMock()
+    strategy.evaluate.return_value = intent
+    risk_engine = MagicMock()
+    risk_engine.evaluate.return_value = make_risk_result(intent, RiskDecision.ALLOW)
+    fill_result = FillResult(
+        order_id="order-1",
+        fill_price=Decimal("0.48"),
+        fill_qty=40,
+        fee=Decimal("2.80"),
+        fill_latency_ms=200,
+        fill_type="paper",
+        status=OrderIntentStatus.PARTIALLY_FILLED,
+    )
+    paper_adapter = MagicMock()
+    paper_adapter.submit_order.return_value = fill_result
+    monkeypatch.setattr("worker.runtime.persist_order", MagicMock(return_value="order-1"))
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock(return_value="fill-1"))
+    update_resting_order_state = MagicMock()
+    monkeypatch.setattr(
+        "worker.runtime.update_resting_order_state",
+        update_resting_order_state,
+    )
+
+    runtime = make_runtime(
+        strategy=strategy,
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+    )
+    await runtime.on_market_update(market)
+
+    open_order = runtime._resting_orders.get_open_orders()[0]
+    assert open_order.order_id == "order-1"
+    assert open_order.accumulated_fill_qty == 40
+    assert open_order.remaining_qty == 60
+    update_resting_order_state.assert_called_once()
+
+
+@pytest.mark.anyio
 async def test_runtime_processes_spread_capture_pair(monkeypatch) -> None:
     market = make_market()
     yes_intent = make_intent(side="yes", price=Decimal("0.46"))
