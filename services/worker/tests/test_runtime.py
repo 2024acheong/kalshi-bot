@@ -91,9 +91,15 @@ def make_risk_result(intent: OrderIntent, decision: RiskDecision) -> RiskEngineR
     )
 
 
-def make_runtime(strategy=None, risk_engine=None, paper_adapter=None, history_window: int = 20):
+def make_runtime(
+    strategy=None,
+    risk_engine=None,
+    paper_adapter=None,
+    history_window: int = 20,
+    run_id: str = "run-1",
+):
     return TradingRuntime(
-        run_id="run-1",
+        run_id=run_id,
         tickers=["KXBTC-26APR-B90000"],
         strategy=strategy or DummyStrategy(),
         risk_engine=risk_engine or MagicMock(),
@@ -111,6 +117,66 @@ class SequenceEstimator(ProbabilityEstimator):
         value = self.values[self.index]
         self.index += 1
         return value
+
+
+def test_runtime_position_keys_include_run_id() -> None:
+    market = make_market()
+    first = make_runtime(run_id="run-1")
+    second = make_runtime(run_id="run-2")
+    first_position = MeanReversionPosition(
+        ticker=market.ticker,
+        side="yes",
+        entry_price=Decimal("0.48"),
+        entry_mid_price=Decimal("0.47"),
+        entry_spread_ticks=Decimal("0.02"),
+        qty=10,
+        opened_at=market.timestamp,
+    )
+    second_position = MeanReversionPosition(
+        ticker=market.ticker,
+        side="no",
+        entry_price=Decimal("0.46"),
+        entry_mid_price=Decimal("0.47"),
+        entry_spread_ticks=Decimal("0.02"),
+        qty=7,
+        opened_at=market.timestamp,
+    )
+
+    first._set_position(market.ticker, first_position)
+    second._set_position(market.ticker, second_position)
+
+    assert first._open_positions == {("run-1", market.ticker): first_position}
+    assert second._open_positions == {("run-2", market.ticker): second_position}
+
+
+def test_runtime_restores_mean_reversion_position_from_row() -> None:
+    market = make_market()
+    runtime = make_runtime(strategy=MeanReversionStrategy())
+
+    runtime.restore_positions(
+        [
+            {
+                "run_id": runtime.run_id,
+                "ticker": market.ticker,
+                "side": "no",
+                "qty": 5,
+                "avg_entry": "0.49",
+                "opened_at": market.timestamp.isoformat(),
+                "metadata_json": {
+                    "strategy_position_type": "mean_reversion",
+                    "entry_mid_price": "0.50",
+                    "entry_spread_ticks": "0.02",
+                },
+            }
+        ]
+    )
+
+    position = runtime._open_positions[(runtime.run_id, market.ticker)]
+    assert isinstance(position, MeanReversionPosition)
+    assert position.side == "no"
+    assert position.entry_price == Decimal("0.49")
+    assert position.entry_mid_price == Decimal("0.50")
+    assert position.qty == 5
 
 
 def test_dummy_strategy_holds_on_wide_spread() -> None:
@@ -322,6 +388,8 @@ async def test_runtime_opens_mean_reversion_position(monkeypatch) -> None:
     paper_adapter.submit_order.return_value = fill_result
     monkeypatch.setattr("worker.runtime.persist_order", MagicMock(return_value="order-1"))
     monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+    persist_open_position = MagicMock(return_value="position-1")
+    monkeypatch.setattr("worker.runtime.persist_open_position", persist_open_position)
 
     runtime = make_runtime(
         strategy=MeanReversionStrategy(),
@@ -330,10 +398,11 @@ async def test_runtime_opens_mean_reversion_position(monkeypatch) -> None:
     )
     await runtime.on_market_update(market)
 
-    position = runtime._open_positions[market.ticker]
+    position = runtime._open_positions[(runtime.run_id, market.ticker)]
     assert position.side == "no"
     assert position.entry_price == Decimal("0.49")
     assert position.qty == 10
+    persist_open_position.assert_called_once()
 
 
 @pytest.mark.anyio
@@ -356,13 +425,15 @@ async def test_runtime_closes_mean_reversion_position(monkeypatch) -> None:
     paper_adapter.submit_order.return_value = fill_result
     monkeypatch.setattr("worker.runtime.persist_order", MagicMock(return_value="order-2"))
     monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+    close_position = MagicMock()
+    monkeypatch.setattr("worker.runtime.close_position", close_position)
 
     runtime = make_runtime(
         strategy=MeanReversionStrategy(),
         risk_engine=risk_engine,
         paper_adapter=paper_adapter,
     )
-    runtime._open_positions[market.ticker] = MeanReversionPosition(
+    runtime._open_positions[(runtime.run_id, market.ticker)] = MeanReversionPosition(
         ticker=market.ticker,
         side="no",
         entry_price=Decimal("0.49"),
@@ -373,7 +444,8 @@ async def test_runtime_closes_mean_reversion_position(monkeypatch) -> None:
     )
     await runtime.on_market_update(market)
 
-    assert market.ticker not in runtime._open_positions
+    assert (runtime.run_id, market.ticker) not in runtime._open_positions
+    close_position.assert_called_once_with(runtime.run_id, market.ticker, "no")
 
 
 @pytest.mark.anyio
@@ -441,6 +513,10 @@ async def test_runtime_opens_and_closes_event_drift_position(monkeypatch) -> Non
         MagicMock(side_effect=["order-1", "order-2"]),
     )
     monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+    persist_open_position = MagicMock(return_value="position-1")
+    close_position = MagicMock()
+    monkeypatch.setattr("worker.runtime.persist_open_position", persist_open_position)
+    monkeypatch.setattr("worker.runtime.close_position", close_position)
 
     runtime = make_runtime(
         strategy=EventDriftStrategy(),
@@ -449,14 +525,16 @@ async def test_runtime_opens_and_closes_event_drift_position(monkeypatch) -> Non
     )
     await runtime.on_market_update(market)
 
-    position = runtime._open_positions[market.ticker]
+    position = runtime._open_positions[(runtime.run_id, market.ticker)]
     assert isinstance(position, EventDriftPosition)
     assert position.side == "yes"
     assert position.entry_momentum == 0.05
+    persist_open_position.assert_called_once()
 
     await runtime.on_market_update(market)
 
-    assert market.ticker not in runtime._open_positions
+    assert (runtime.run_id, market.ticker) not in runtime._open_positions
+    close_position.assert_called_once_with(runtime.run_id, market.ticker, "yes")
 
 
 @pytest.mark.anyio
@@ -510,6 +588,10 @@ async def test_runtime_opens_and_closes_calibration_mispricing_position(
         MagicMock(side_effect=["order-1", "order-2"]),
     )
     monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+    persist_open_position = MagicMock(return_value="position-1")
+    close_position = MagicMock()
+    monkeypatch.setattr("worker.runtime.persist_open_position", persist_open_position)
+    monkeypatch.setattr("worker.runtime.close_position", close_position)
 
     runtime = make_runtime(
         strategy=CalibrationMispricingStrategy(
@@ -520,14 +602,16 @@ async def test_runtime_opens_and_closes_calibration_mispricing_position(
     )
     await runtime.on_market_update(market)
 
-    position = runtime._open_positions[market.ticker]
+    position = runtime._open_positions[(runtime.run_id, market.ticker)]
     assert isinstance(position, CalibrationMispricingPosition)
     assert position.side == "yes"
     assert position.entry_model_prob == 0.60
+    persist_open_position.assert_called_once()
 
     await runtime.on_market_update(market)
 
-    assert market.ticker not in runtime._open_positions
+    assert (runtime.run_id, market.ticker) not in runtime._open_positions
+    close_position.assert_called_once_with(runtime.run_id, market.ticker, "yes")
 
 
 @pytest.mark.anyio

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from core.execution.adapters import FillResult, PaperAdapter
 from core.execution.resting_orders import RestingOrder, RestingOrderBook
@@ -16,7 +17,10 @@ from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
 from worker.execution_repository import (
+    close_position,
+    load_open_positions,
     persist_fill,
+    persist_open_position,
     persist_order,
     resting_order_metadata,
     update_order_status,
@@ -26,6 +30,8 @@ from worker.monitoring import emit_alert
 
 
 logger = logging.getLogger(__name__)
+PositionState = MeanReversionPosition | EventDriftPosition | CalibrationMispricingPosition
+PositionKey = tuple[str, str]
 
 
 class TradingRuntime:
@@ -46,10 +52,7 @@ class TradingRuntime:
         self.paper_adapter = paper_adapter
         self.default_max_resting_seconds = default_max_resting_seconds
         self._resting_orders = RestingOrderBook(paper_adapter=self.paper_adapter)
-        self._open_positions: dict[
-            str,
-            MeanReversionPosition | EventDriftPosition | CalibrationMispricingPosition,
-        ] = {}
+        self._open_positions: dict[PositionKey, PositionState] = {}
         self.history_window = history_window
         self._history: dict[str, list[MarketState]] = {ticker: [] for ticker in tickers}
         self._running = False
@@ -65,6 +68,16 @@ class TradingRuntime:
     def restore_resting_orders(self, orders: list[RestingOrder]) -> None:
         for order in orders:
             self._resting_orders.restore_order(order)
+
+    def restore_positions(self, rows: list[dict]) -> None:
+        for row in rows:
+            position = self._position_from_row(row)
+            if position is None:
+                continue
+            self._set_position(position.ticker, position)
+
+    def restore_positions_from_repository(self) -> None:
+        self.restore_positions(load_open_positions(self.run_id))
 
     async def on_market_update(self, market: MarketState) -> None:
         as_of = datetime.now(timezone.utc)
@@ -108,7 +121,7 @@ class TradingRuntime:
         features: FeatureVector,
         as_of: datetime,
     ) -> None:
-        position = self._open_positions.get(market.ticker)
+        position = self._get_position(market.ticker)
         if position is not None:
             exit_intent = self.strategy.evaluate_exit(position, market, as_of=as_of)
             if exit_intent is None:
@@ -119,7 +132,7 @@ class TradingRuntime:
             if fill_result is None or fill_result.fill_qty <= 0:
                 return
 
-            self._open_positions.pop(market.ticker, None)
+            self._close_position(market.ticker, position)
             logger.info(
                 "Mean reversion position closed ticker=%s side=%s entry_price=%s "
                 "exit_price=%s qty=%s",
@@ -144,7 +157,7 @@ class TradingRuntime:
 
         entry_mid_price = (market.yes_bid + market.yes_ask) / 2
         entry_spread_ticks = market.yes_ask - market.yes_bid
-        self._open_positions[market.ticker] = MeanReversionPosition(
+        position = MeanReversionPosition(
             ticker=market.ticker,
             side=entry_intent.side,
             entry_price=fill_result.fill_price,
@@ -153,6 +166,8 @@ class TradingRuntime:
             qty=fill_result.fill_qty,
             opened_at=as_of,
         )
+        self._set_position(market.ticker, position)
+        self._persist_position(position)
         logger.info(
             "Mean reversion position opened ticker=%s side=%s price=%s qty=%s",
             market.ticker,
@@ -167,7 +182,7 @@ class TradingRuntime:
         features: FeatureVector,
         as_of: datetime,
     ) -> None:
-        position = self._open_positions.get(market.ticker)
+        position = self._get_position(market.ticker)
         if position is not None:
             exit_intent = self.strategy.evaluate_exit(
                 position,
@@ -183,7 +198,7 @@ class TradingRuntime:
             if fill_result is None or fill_result.fill_qty <= 0:
                 return
 
-            self._open_positions.pop(market.ticker, None)
+            self._close_position(market.ticker, position)
             logger.info(
                 "Event drift position closed ticker=%s side=%s entry_price=%s "
                 "exit_price=%s qty=%s",
@@ -211,7 +226,7 @@ class TradingRuntime:
             return
 
         entry_mid_price = (market.yes_bid + market.yes_ask) / 2
-        self._open_positions[market.ticker] = EventDriftPosition(
+        position = EventDriftPosition(
             ticker=market.ticker,
             side=entry_intent.side,
             entry_price=fill_result.fill_price,
@@ -220,6 +235,8 @@ class TradingRuntime:
             qty=fill_result.fill_qty,
             opened_at=as_of,
         )
+        self._set_position(market.ticker, position)
+        self._persist_position(position)
         logger.info(
             "Event drift position opened ticker=%s side=%s price=%s qty=%s",
             market.ticker,
@@ -234,7 +251,7 @@ class TradingRuntime:
         features: FeatureVector,
         as_of: datetime,
     ) -> None:
-        position = self._open_positions.get(market.ticker)
+        position = self._get_position(market.ticker)
         if position is not None:
             exit_intent = self.strategy.evaluate_exit(
                 position,
@@ -250,7 +267,7 @@ class TradingRuntime:
             if fill_result is None or fill_result.fill_qty <= 0:
                 return
 
-            self._open_positions.pop(market.ticker, None)
+            self._close_position(market.ticker, position)
             logger.info(
                 "Calibration mispricing position closed ticker=%s side=%s "
                 "entry_price=%s exit_price=%s qty=%s",
@@ -270,7 +287,7 @@ class TradingRuntime:
         if fill_result is None or fill_result.fill_qty <= 0:
             return
 
-        self._open_positions[market.ticker] = CalibrationMispricingPosition(
+        position = CalibrationMispricingPosition(
             ticker=market.ticker,
             side=entry_intent.side,
             entry_price=fill_result.fill_price,
@@ -278,6 +295,8 @@ class TradingRuntime:
             qty=fill_result.fill_qty,
             opened_at=as_of,
         )
+        self._set_position(market.ticker, position)
+        self._persist_position(position)
         logger.info(
             "Calibration mispricing position opened ticker=%s side=%s price=%s qty=%s",
             market.ticker,
@@ -520,6 +539,101 @@ class TradingRuntime:
         )
         self._resting_orders.restore_order(order)
         update_resting_order_state(order)
+
+    def _position_key(self, ticker: str) -> PositionKey:
+        return (self.run_id, ticker)
+
+    def _get_position(self, ticker: str) -> PositionState | None:
+        return self._open_positions.get(self._position_key(ticker))
+
+    def _set_position(self, ticker: str, position: PositionState) -> None:
+        self._open_positions[self._position_key(ticker)] = position
+
+    def _close_position(self, ticker: str, position: PositionState) -> None:
+        close_position(self.run_id, ticker, position.side)
+        self._open_positions.pop(self._position_key(ticker), None)
+
+    def _persist_position(self, position: PositionState) -> None:
+        persist_open_position(
+            run_id=self.run_id,
+            ticker=position.ticker,
+            side=position.side,
+            qty=position.qty,
+            avg_entry=position.entry_price,
+            opened_at=position.opened_at,
+            metadata=self._position_metadata(position),
+        )
+
+    def _position_metadata(self, position: PositionState) -> dict:
+        if isinstance(position, MeanReversionPosition):
+            return {
+                "strategy_position_type": "mean_reversion",
+                "entry_mid_price": str(position.entry_mid_price),
+                "entry_spread_ticks": str(position.entry_spread_ticks),
+            }
+        if isinstance(position, EventDriftPosition):
+            return {
+                "strategy_position_type": "event_drift",
+                "entry_mid_price": str(position.entry_mid_price),
+                "entry_momentum": position.entry_momentum,
+            }
+        if isinstance(position, CalibrationMispricingPosition):
+            return {
+                "strategy_position_type": "calibration_mispricing",
+                "entry_model_prob": position.entry_model_prob,
+            }
+        return {}
+
+    def _position_from_row(self, row: dict) -> PositionState | None:
+        metadata = row.get("metadata_json") or {}
+        position_type = metadata.get("strategy_position_type")
+        ticker = str(row["ticker"])
+        side = str(row["side"])
+        qty = int(row["qty"])
+        entry_price = self._decimal(row["avg_entry"])
+        opened_at = self._datetime(row["opened_at"])
+
+        if position_type == "mean_reversion":
+            return MeanReversionPosition(
+                ticker=ticker,
+                side=side,
+                entry_price=entry_price,
+                entry_mid_price=self._decimal(metadata["entry_mid_price"]),
+                entry_spread_ticks=self._decimal(metadata["entry_spread_ticks"]),
+                qty=qty,
+                opened_at=opened_at,
+            )
+        if position_type == "event_drift":
+            return EventDriftPosition(
+                ticker=ticker,
+                side=side,
+                entry_price=entry_price,
+                entry_mid_price=self._decimal(metadata["entry_mid_price"]),
+                entry_momentum=float(metadata["entry_momentum"]),
+                qty=qty,
+                opened_at=opened_at,
+            )
+        if position_type == "calibration_mispricing":
+            return CalibrationMispricingPosition(
+                ticker=ticker,
+                side=side,
+                entry_price=entry_price,
+                entry_model_prob=float(metadata["entry_model_prob"]),
+                qty=qty,
+                opened_at=opened_at,
+            )
+        return None
+
+    def _decimal(self, value) -> Decimal:
+        return Decimal(str(value))
+
+    def _datetime(self, value) -> datetime:
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc)
+        text = str(value)
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        return datetime.fromisoformat(text).astimezone(timezone.utc)
 
     def pause(self) -> None:
         self._paused = True
