@@ -45,7 +45,7 @@ def make_intent(**kwargs) -> OrderIntent:
 def test_fee_calculation_basic():
     fee = compute_kalshi_fee(Decimal("0.50"), 100)
 
-    assert fee == Decimal("1.75")
+    assert fee == Decimal("7.00")
 
 
 def test_fee_calculation_extreme_price():
@@ -73,6 +73,18 @@ def test_limit_order_fills_when_price_crossed():
     assert result.status == OrderIntentStatus.FILLED
     assert result.fill_price == Decimal("0.48")
     assert result.fill_qty == 100
+
+
+def test_limit_order_does_not_fill_on_touch():
+    result = PaperAdapter().submit_order(
+        "order-1",
+        make_intent(price=Decimal("0.48")),
+        "limit",
+        make_market(yes_ask=Decimal("0.48")),
+    )
+
+    assert result.status == OrderIntentStatus.CANCELLED
+    assert result.fill_qty == 0
 
 
 def test_limit_order_does_not_fill_when_price_not_crossed():
@@ -163,3 +175,31 @@ def test_no_side_limit_order_logic():
     assert result.status == OrderIntentStatus.FILLED
     assert result.fill_price == Decimal("0.47")
     assert result.fill_qty == 100
+
+
+def test_no_side_limit_order_does_not_fill_on_touch():
+    result = PaperAdapter().submit_order(
+        "order-1",
+        make_intent(side="no", price=Decimal("0.47")),
+        "limit",
+        make_market(yes_bid=Decimal("0.47")),
+    )
+
+    assert result.status == OrderIntentStatus.CANCELLED
+    assert result.fill_qty == 0
+
+
+def test_configurable_fee_per_contract():
+    result = PaperAdapter(
+        SimulationConfig(
+            fee_per_contract=Decimal("0.02"),
+            staleness_threshold_ms=5000,
+        )
+    ).submit_order(
+        "order-1",
+        make_intent(qty=10),
+        "limit",
+        make_market(yes_ask=Decimal("0.48")),
+    )
+
+    assert result.fee == Decimal("0.20")

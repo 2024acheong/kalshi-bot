@@ -206,7 +206,7 @@ class Backtester:
                 fill_result = self.paper_adapter.submit_order(
                     order_id=f"backtest-order-{index:08d}-{leg_index}",
                     intent=order_intent,
-                    order_type="limit",
+                    order_type="market",
                     market=replay_market,
                 )
                 fill = self._serialize_fill(
@@ -368,7 +368,7 @@ class Backtester:
         fill_result = self.paper_adapter.submit_order(
             order_id=f"backtest-order-{index:08d}-{leg_index}",
             intent=intent,
-            order_type="limit",
+            order_type="market",
             market=market,
         )
         fills.append(self._serialize_fill(fill_result, intent.model_prob, intent.side))
@@ -470,7 +470,7 @@ class Backtester:
         fill_result = self.paper_adapter.submit_order(
             order_id=f"backtest-order-{index:08d}-{leg_index}",
             intent=intent,
-            order_type="limit",
+            order_type="market",
             market=market,
         )
         fills.append(self._serialize_fill(fill_result, intent.model_prob, intent.side))
@@ -576,7 +576,7 @@ class Backtester:
         fill_result = self.paper_adapter.submit_order(
             order_id=f"backtest-order-{index:08d}-{leg_index}",
             intent=intent,
-            order_type="limit",
+            order_type="market",
             market=market,
         )
         fills.append(self._serialize_fill(fill_result, intent.model_prob, intent.side))

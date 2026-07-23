@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
-from core.execution.adapters import FillResult, PaperAdapter, check_limit_crossed
+from core.execution.adapters import FillResult, PaperAdapter, check_limit_traded_through
 from core.risk.engine import OrderIntent
 from core.schemas.market import MarketState, OrderIntentStatus
 
@@ -23,6 +23,10 @@ class RestingOrder:
     pair_id: str | None = None
     status: OrderIntentStatus = OrderIntentStatus.SUBMITTED
     accumulated_fill_qty: int = 0
+
+    @property
+    def remaining_qty(self) -> int:
+        return max(self.intent.qty - self.accumulated_fill_qty, 0)
 
 
 class RestingOrderBook:
@@ -57,6 +61,16 @@ class RestingOrderBook:
         )
         return order_id
 
+    def restore_order(self, order: RestingOrder) -> None:
+        if order.status not in {
+            OrderIntentStatus.SUBMITTED,
+            OrderIntentStatus.PARTIALLY_FILLED,
+        }:
+            return
+        if order.remaining_qty <= 0:
+            return
+        self._open_orders[order.order_id] = order
+
     def check_tick(
         self,
         market: MarketState,
@@ -80,10 +94,10 @@ class RestingOrderBook:
                 results.append((replace(order), self._cancelled_fill(order)))
                 continue
 
-            if not check_limit_crossed(order.intent, market):
+            if not check_limit_traded_through(order.intent, market):
                 continue
 
-            remaining_qty = order.intent.qty - order.accumulated_fill_qty
+            remaining_qty = order.remaining_qty
             if remaining_qty <= 0:
                 order.status = OrderIntentStatus.FILLED
                 self._open_orders.pop(order.order_id, None)

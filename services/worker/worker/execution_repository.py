@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from core.execution.adapters import FillResult
+from core.execution.resting_orders import RestingOrder
+from core.risk.engine import OrderIntent
+from core.schemas.market import OrderIntentStatus
 
 
 def _get_supabase() -> Any:
@@ -46,6 +50,24 @@ def create_strategy_run(config_id: str, mode: str = "paper") -> str:
     }
     response = _get_supabase().table("strategy_runs").insert(row).execute()
     return _response_id(response, "strategy_runs")
+
+
+def get_or_create_strategy_run(config_id: str, mode: str = "paper") -> str:
+    response = (
+        _get_supabase()
+        .table("strategy_runs")
+        .select("id")
+        .eq("config_id", config_id)
+        .eq("mode", mode)
+        .is_("ended_at", "null")
+        .order("started_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(response, "data", None) or []
+    if rows:
+        return str(rows[0]["id"])
+    return create_strategy_run(config_id=config_id, mode=mode)
 
 
 def persist_order(
@@ -98,3 +120,122 @@ def persist_fill(
 def update_order_status(order_id: str, status: str) -> None:
     """Update an order's status field."""
     _get_supabase().table("orders").update({"status": status}).eq("id", order_id).execute()
+
+
+def update_order_metadata(
+    order_id: str,
+    *,
+    status: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    row: dict[str, Any] = {}
+    if status is not None:
+        row["status"] = status
+    if metadata is not None:
+        row["metadata_json"] = metadata
+    if not row:
+        return
+    _get_supabase().table("orders").update(row).eq("id", order_id).execute()
+
+
+def resting_order_metadata(
+    *,
+    pair_id: str | None,
+    max_resting_seconds: int,
+    created_at: datetime,
+    accumulated_fill_qty: int,
+    total_qty: int,
+    extra: dict | None = None,
+) -> dict:
+    remaining_qty = max(total_qty - accumulated_fill_qty, 0)
+    metadata = {
+        "resting_order": True,
+        "order_type": "limit",
+        "pair_id": pair_id,
+        "max_resting_seconds": max_resting_seconds,
+        "created_at": created_at.astimezone(timezone.utc).isoformat(),
+        "accumulated_fill_qty": accumulated_fill_qty,
+        "remaining_qty": remaining_qty,
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata
+
+
+def update_resting_order_state(
+    order: RestingOrder,
+    *,
+    extra: dict | None = None,
+) -> None:
+    update_order_metadata(
+        order.order_id,
+        status=order.status.value,
+        metadata=resting_order_metadata(
+            pair_id=order.pair_id,
+            max_resting_seconds=order.max_resting_seconds,
+            created_at=order.created_at,
+            accumulated_fill_qty=order.accumulated_fill_qty,
+            total_qty=order.intent.qty,
+            extra=extra,
+        ),
+    )
+
+
+def load_open_resting_orders(run_id: str) -> list[RestingOrder]:
+    response = (
+        _get_supabase()
+        .table("orders")
+        .select(
+            "id,run_id,ticker,side,price,qty,status,created_at,signal_id,metadata_json"
+        )
+        .eq("run_id", run_id)
+        .in_("status", ["submitted", "partially_filled"])
+        .execute()
+    )
+    rows = getattr(response, "data", None) or []
+    return [_resting_order_from_row(row) for row in rows if _is_resting_order(row)]
+
+
+def _is_resting_order(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata_json") or {}
+    return bool(metadata.get("resting_order"))
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc)
+    text = str(value)
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    return datetime.fromisoformat(text).astimezone(timezone.utc)
+
+
+def _resting_order_from_row(row: dict[str, Any]) -> RestingOrder:
+    metadata = row.get("metadata_json") or {}
+    qty = int(row["qty"])
+    remaining_qty = metadata.get("remaining_qty")
+    accumulated_fill_qty = metadata.get("accumulated_fill_qty")
+    if accumulated_fill_qty is None and remaining_qty is not None:
+        accumulated_fill_qty = qty - int(remaining_qty)
+    accumulated_fill_qty = int(accumulated_fill_qty or 0)
+
+    intent = OrderIntent(
+        ticker=str(row["ticker"]),
+        side=str(row["side"]),
+        price=Decimal(str(row["price"])),
+        qty=qty,
+        estimated_edge=float(metadata.get("estimated_edge", 0.0)),
+        model_prob=float(metadata.get("model_prob", row["price"])),
+        run_id=str(row["run_id"]),
+        signal_id=row.get("signal_id"),
+    )
+    return RestingOrder(
+        order_id=str(row["id"]),
+        intent=intent,
+        order_type=str(metadata.get("order_type") or "limit"),
+        created_at=_parse_datetime(metadata.get("created_at") or row["created_at"]),
+        max_resting_seconds=int(metadata.get("max_resting_seconds") or 30),
+        pair_id=metadata.get("pair_id"),
+        status=OrderIntentStatus(str(row["status"])),
+        accumulated_fill_qty=accumulated_fill_qty,
+    )

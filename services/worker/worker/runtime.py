@@ -15,7 +15,13 @@ from core.strategies.calibration_mispricing import (
 from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
-from worker.execution_repository import persist_fill, persist_order, update_order_status
+from worker.execution_repository import (
+    persist_fill,
+    persist_order,
+    resting_order_metadata,
+    update_order_status,
+    update_resting_order_state,
+)
 from worker.monitoring import emit_alert
 
 
@@ -31,12 +37,14 @@ class TradingRuntime:
         risk_engine: RiskEngine,
         paper_adapter: PaperAdapter,
         history_window: int = 20,
+        default_max_resting_seconds: int = 30,
     ):
         self.run_id = run_id
         self.tickers = tickers
         self.strategy = strategy
         self.risk_engine = risk_engine
         self.paper_adapter = paper_adapter
+        self.default_max_resting_seconds = default_max_resting_seconds
         self._resting_orders = RestingOrderBook(paper_adapter=self.paper_adapter)
         self._open_positions: dict[
             str,
@@ -53,6 +61,10 @@ class TradingRuntime:
         self._daily_realized_pnl_usd = 0.0
         self._kill_switch_active = False
         self._global_kill_switch = False
+
+    def restore_resting_orders(self, orders: list[RestingOrder]) -> None:
+        for order in orders:
+            self._resting_orders.restore_order(order)
 
     async def on_market_update(self, market: MarketState) -> None:
         as_of = datetime.now(timezone.utc)
@@ -343,7 +355,15 @@ class TradingRuntime:
             metadata={
                 "blocked_by": result.blocked_by,
                 "gates": [gate.gate for gate in result.gate_results],
-                "pair_id": pair_id,
+                "estimated_edge": intent.estimated_edge,
+                "model_prob": intent.model_prob,
+                **resting_order_metadata(
+                    pair_id=pair_id,
+                    max_resting_seconds=max_resting_seconds,
+                    created_at=as_of,
+                    accumulated_fill_qty=0,
+                    total_qty=intent.qty,
+                ),
             },
         )
 
@@ -379,6 +399,7 @@ class TradingRuntime:
     ) -> None:
         for order, fill_result in events:
             persist_fill(order.order_id, fill_result)
+            update_resting_order_state(order)
             if fill_result.fill_qty > 0:
                 self._current_exposure_usd += fill_result.fill_qty * float(
                     fill_result.fill_price
@@ -390,6 +411,7 @@ class TradingRuntime:
                         cancelled_order.order_id,
                         OrderIntentStatus.CANCELLED.value,
                     )
+                    update_resting_order_state(cancelled_order)
                     logger.info(
                         "Cancelled spread capture sibling order=%s pair_id=%s",
                         cancelled_order.order_id,
@@ -428,6 +450,7 @@ class TradingRuntime:
             metadata={
                 "blocked_by": result.blocked_by,
                 "gates": [gate.gate for gate in result.gate_results],
+                "order_type": "market",
             },
         )
 
@@ -452,13 +475,19 @@ class TradingRuntime:
         fill_result = self.paper_adapter.submit_order(
             order_id=order_id,
             intent=intent,
-            order_type="limit",
+            order_type="market",
             market=market,
         )
         persist_fill(order_id, fill_result)
 
         if fill_result.fill_qty > 0:
             self._current_exposure_usd += fill_result.fill_qty * float(fill_result.fill_price)
+        if fill_result.status == OrderIntentStatus.PARTIALLY_FILLED:
+            self._rest_partially_filled_order(
+                order_id=order_id,
+                intent=intent,
+                filled_qty=fill_result.fill_qty,
+            )
 
         logger.info(
             "Order processed ticker=%s decision=%s fill_status=%s fill_qty=%s fill_price=%s",
@@ -469,6 +498,28 @@ class TradingRuntime:
             fill_result.fill_price,
         )
         return fill_result
+
+    def _rest_partially_filled_order(
+        self,
+        *,
+        order_id: str,
+        intent: OrderIntent,
+        filled_qty: int,
+    ) -> None:
+        if filled_qty >= intent.qty:
+            return
+        order = RestingOrder(
+            order_id=order_id,
+            intent=intent,
+            order_type="limit",
+            created_at=datetime.now(timezone.utc),
+            max_resting_seconds=self.default_max_resting_seconds,
+            pair_id=None,
+            status=OrderIntentStatus.PARTIALLY_FILLED,
+            accumulated_fill_qty=filled_qty,
+        )
+        self._resting_orders.restore_order(order)
+        update_resting_order_state(order)
 
     def pause(self) -> None:
         self._paused = True
