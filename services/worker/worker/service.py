@@ -176,7 +176,7 @@ class IngestionService:
             market = self._apply_orderbook_delta(message)
 
         if market is None:
-            self._logger.info(
+            self._logger.debug(
                 "Observed websocket message type=%s keys=%s",
                 message.get("type"),
                 sorted(message.keys()),

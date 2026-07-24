@@ -6,9 +6,11 @@ from decimal import Decimal
 from types import ModuleType, SimpleNamespace
 
 from worker.execution_repository import (
+    _ENSURED_CATALOG_TICKERS,
     _get_supabase,
     close_position,
     create_strategy_run,
+    ensure_market_catalog_entry,
     ensure_strategy_config,
     load_open_positions,
     persist_open_position,
@@ -58,8 +60,10 @@ class FakeTable:
 class FakeSupabase:
     def __init__(self) -> None:
         self.tables: dict[str, FakeTable] = {}
+        self.table_calls: list[str] = []
 
     def table(self, name: str) -> FakeTable:
+        self.table_calls.append(name)
         return self.tables[name]
 
 
@@ -121,7 +125,9 @@ def test_create_strategy_run_inserts_config_and_mode(monkeypatch) -> None:
 
 
 def test_persist_open_position_upserts_position_metadata(monkeypatch) -> None:
+    _ENSURED_CATALOG_TICKERS.clear()
     fake = FakeSupabase()
+    fake.tables["market_catalog"] = FakeTable(response_id="KXTEST")
     fake.tables["positions"] = FakeTable(response_id="position-1")
     monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
     opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -149,7 +155,9 @@ def test_persist_open_position_upserts_position_metadata(monkeypatch) -> None:
 
 
 def test_persist_signal_upserts_signal_payload(monkeypatch) -> None:
+    _ENSURED_CATALOG_TICKERS.clear()
     fake = FakeSupabase()
+    fake.tables["market_catalog"] = FakeTable(response_id="KXTEST")
     fake.tables["signals"] = FakeTable(response_id="signal-1")
     monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
     timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -165,6 +173,14 @@ def test_persist_signal_upserts_signal_payload(monkeypatch) -> None:
     )
 
     assert signal_id == "signal-1"
+    assert fake.tables["market_catalog"].insert_calls == [
+        {
+            "ticker": "KXTEST",
+            "title": "KXTEST",
+            "status": "open",
+            "synced_at": fake.tables["market_catalog"].insert_calls[0]["synced_at"],
+        }
+    ]
     row, conflict = fake.tables["signals"].upsert_calls[0]
     assert conflict == "id"
     assert row["id"] == "signal-1"
@@ -173,6 +189,18 @@ def test_persist_signal_upserts_signal_payload(monkeypatch) -> None:
     assert row["prob_estimate"] == 0.62
     assert row["edge"] == 0.03
     assert row["signal_payload"] == {"order_type": "market"}
+
+
+def test_ensure_market_catalog_entry_is_cached(monkeypatch) -> None:
+    _ENSURED_CATALOG_TICKERS.clear()
+    fake = FakeSupabase()
+    fake.tables["market_catalog"] = FakeTable(response_id="KXTEST")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+
+    ensure_market_catalog_entry("KXTEST")
+    ensure_market_catalog_entry("KXTEST")
+
+    assert len(fake.tables["market_catalog"].insert_calls) == 1
 
 
 def test_close_position_zeroes_qty(monkeypatch) -> None:

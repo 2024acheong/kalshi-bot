@@ -16,10 +16,45 @@ def _get_supabase() -> Any:
     return supabase
 
 
+_ENSURED_CATALOG_TICKERS: set[str] = set()
+
+
 def _response_id(response: Any, table: str) -> str:
     if not response.data:
         raise RuntimeError(f"Supabase returned no rows when writing {table}")
     return response.data[0]["id"]
+
+
+def _is_duplicate_key_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "23505" in text or "duplicate key" in text
+
+
+def ensure_market_catalog_entry(ticker: str) -> None:
+    """
+    Ensure FK-backed execution tables can reference a live-discovered ticker.
+
+    Catalog sync normally writes full market metadata before trading starts, but
+    websocket/order processing can still encounter a ticker before that row is
+    visible to PostgREST. Insert a minimal placeholder and let later catalog
+    sync overwrite it with richer title/category/close_time data.
+    """
+    normalized = str(ticker)
+    if normalized in _ENSURED_CATALOG_TICKERS:
+        return
+
+    row = {
+        "ticker": normalized,
+        "title": normalized,
+        "status": "open",
+        "synced_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _get_supabase().table("market_catalog").insert(row).execute()
+    except Exception as exc:
+        if not _is_duplicate_key_error(exc):
+            raise
+    _ENSURED_CATALOG_TICKERS.add(normalized)
 
 
 def ensure_strategy_config(name: str, version: int, params: dict | None = None) -> str:
@@ -94,6 +129,7 @@ def persist_order(
     metadata: dict | None = None,
 ) -> str:
     """Insert a row into orders, return the new order id."""
+    ensure_market_catalog_entry(ticker)
     row = {
         "run_id": run_id,
         "signal_id": signal_id,
@@ -121,6 +157,7 @@ def persist_signal(
     payload: dict | None = None,
     signal_id: str | None = None,
 ) -> str:
+    ensure_market_catalog_entry(ticker)
     row = {
         "run_id": run_id,
         "ticker": ticker,
@@ -228,6 +265,7 @@ def persist_open_position(
     opened_at: datetime,
     metadata: dict | None = None,
 ) -> str:
+    ensure_market_catalog_entry(ticker)
     row = {
         "run_id": run_id,
         "ticker": ticker,
