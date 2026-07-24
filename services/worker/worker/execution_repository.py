@@ -40,6 +40,17 @@ def ensure_strategy_config(name: str, version: int, params: dict | None = None) 
     return _response_id(response, "strategy_configs")
 
 
+def load_enabled_strategy_configs() -> list[dict[str, Any]]:
+    response = (
+        _get_supabase()
+        .table("strategy_configs")
+        .select("id,name,version,params_json,status")
+        .eq("status", "enabled")
+        .execute()
+    )
+    return getattr(response, "data", None) or []
+
+
 def create_strategy_run(config_id: str, mode: str = "paper") -> str:
     """
     Insert a strategy_runs row and return its id for use as the runtime run_id.
@@ -97,6 +108,32 @@ def persist_order(
     }
     response = _get_supabase().table("orders").insert(row).execute()
     return _response_id(response, "orders")
+
+
+def persist_signal(
+    *,
+    run_id: str,
+    ticker: str,
+    timestamp: datetime,
+    model_id: str | None = None,
+    prob_estimate: float | None = None,
+    edge: float | None = None,
+    payload: dict | None = None,
+    signal_id: str | None = None,
+) -> str:
+    row = {
+        "run_id": run_id,
+        "ticker": ticker,
+        "timestamp": timestamp.astimezone(timezone.utc).isoformat(),
+        "model_id": model_id,
+        "prob_estimate": prob_estimate,
+        "edge": edge,
+        "signal_payload": payload or {},
+    }
+    if signal_id:
+        row["id"] = signal_id
+    response = _get_supabase().table("signals").upsert(row, on_conflict="id").execute()
+    return _response_id(response, "signals")
 
 
 def persist_fill(

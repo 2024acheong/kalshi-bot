@@ -12,6 +12,7 @@ from worker.execution_repository import (
     ensure_strategy_config,
     load_open_positions,
     persist_open_position,
+    persist_signal,
 )
 from worker.storage import _get_supabase_credentials
 
@@ -145,6 +146,33 @@ def test_persist_open_position_upserts_position_metadata(monkeypatch) -> None:
     assert row["qty"] == 5
     assert row["avg_entry"] == "0.42"
     assert row["metadata_json"] == {"strategy_position_type": "mean_reversion"}
+
+
+def test_persist_signal_upserts_signal_payload(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["signals"] = FakeTable(response_id="signal-1")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    signal_id = persist_signal(
+        run_id="run-1",
+        ticker="KXTEST",
+        timestamp=timestamp,
+        prob_estimate=0.62,
+        edge=0.03,
+        payload={"order_type": "market"},
+        signal_id="signal-1",
+    )
+
+    assert signal_id == "signal-1"
+    row, conflict = fake.tables["signals"].upsert_calls[0]
+    assert conflict == "id"
+    assert row["id"] == "signal-1"
+    assert row["run_id"] == "run-1"
+    assert row["ticker"] == "KXTEST"
+    assert row["prob_estimate"] == 0.62
+    assert row["edge"] == 0.03
+    assert row["signal_payload"] == {"order_type": "market"}
 
 
 def test_close_position_zeroes_qty(monkeypatch) -> None:

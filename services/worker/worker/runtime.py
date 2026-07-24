@@ -22,6 +22,7 @@ from worker.execution_repository import (
     persist_fill,
     persist_open_position,
     persist_order,
+    persist_signal,
     resting_order_metadata,
     update_order_status,
     update_resting_order_state,
@@ -361,6 +362,7 @@ class TradingRuntime:
             if result.decision == RiskDecision.ALLOW
             else "rejected"
         )
+        signal_id = self._persist_signal_for_intent(intent, market, features, "resting_limit")
         order_id = persist_order(
             run_id=intent.run_id,
             ticker=intent.ticker,
@@ -370,7 +372,7 @@ class TradingRuntime:
             qty=intent.qty,
             risk_decision=result.decision.value,
             status=order_status,
-            signal_id=intent.signal_id,
+            signal_id=signal_id,
             metadata={
                 "blocked_by": result.blocked_by,
                 "gates": [gate.gate for gate in result.gate_results],
@@ -456,6 +458,7 @@ class TradingRuntime:
             global_kill_switch=self._global_kill_switch,
         )
         order_status = "approved" if result.decision == RiskDecision.ALLOW else "rejected"
+        signal_id = self._persist_signal_for_intent(intent, market, features, "market")
         order_id = persist_order(
             run_id=intent.run_id,
             ticker=intent.ticker,
@@ -465,7 +468,7 @@ class TradingRuntime:
             qty=intent.qty,
             risk_decision=result.decision.value,
             status=order_status,
-            signal_id=intent.signal_id,
+            signal_id=signal_id,
             metadata={
                 "blocked_by": result.blocked_by,
                 "gates": [gate.gate for gate in result.gate_results],
@@ -539,6 +542,35 @@ class TradingRuntime:
         )
         self._resting_orders.restore_order(order)
         update_resting_order_state(order)
+
+    def _persist_signal_for_intent(
+        self,
+        intent: OrderIntent,
+        market: MarketState,
+        features: FeatureVector,
+        order_type: str,
+    ) -> str:
+        return persist_signal(
+            run_id=intent.run_id,
+            ticker=intent.ticker,
+            timestamp=features.timestamp,
+            prob_estimate=intent.model_prob,
+            edge=intent.estimated_edge,
+            signal_id=intent.signal_id,
+            payload={
+                "strategy_runtime_run_id": self.run_id,
+                "side": intent.side,
+                "price": str(intent.price),
+                "qty": intent.qty,
+                "order_type": order_type,
+                "is_closing_order": intent.is_closing_order,
+                "market": {
+                    "yes_bid": str(market.yes_bid) if market.yes_bid is not None else None,
+                    "yes_ask": str(market.yes_ask) if market.yes_ask is not None else None,
+                    "last_price": str(market.last_price) if market.last_price is not None else None,
+                },
+            },
+        )
 
     def _position_key(self, ticker: str) -> PositionKey:
         return (self.run_id, ticker)

@@ -33,6 +33,11 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+def mock_signal_persistence(monkeypatch):
+    monkeypatch.setattr("worker.runtime.persist_signal", MagicMock(return_value="signal-1"))
+
+
 def make_market(**kwargs) -> MarketState:
     now = datetime.now(timezone.utc)
     defaults = {
