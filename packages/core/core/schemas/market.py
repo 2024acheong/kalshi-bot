@@ -48,6 +48,10 @@ class MarketState:
     status: MarketStatus
     source: str  # "websocket" | "rest_poll" | "rest_snapshot"
     raw_sequence: Optional[int] = None
+    no_bid: Optional[Decimal] = None
+    no_ask: Optional[Decimal] = None
+    no_bid_size: Optional[int] = None
+    no_ask_size: Optional[int] = None
 
 
 @dataclass

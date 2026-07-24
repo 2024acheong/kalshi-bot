@@ -15,7 +15,7 @@ from core.strategies.calibration_mispricing import (
 )
 from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
-from core.strategies.spread_capture import SpreadCaptureIntent
+from core.strategies.spread_capture import SpreadCaptureIntent, SpreadCaptureStrategy
 from worker.execution_repository import (
     close_position,
     load_open_positions,
@@ -105,6 +105,21 @@ class TradingRuntime:
         if isinstance(self.strategy, MeanReversionStrategy):
             await self._process_mean_reversion_update(market, features, as_of)
             return
+
+        if isinstance(self.strategy, SpreadCaptureStrategy):
+            arbitrage_intent = self.strategy.evaluate_arbitrage_entry(
+                market,
+                features,
+                self.run_id,
+                qty=self.strategy.qty_per_leg,
+            )
+            if arbitrage_intent is not None:
+                await self._process_spread_capture_intent(
+                    arbitrage_intent,
+                    market,
+                    features,
+                )
+                return
 
         intent = self.strategy.evaluate(market, features, self.run_id)
         if intent is None:
@@ -312,6 +327,10 @@ class TradingRuntime:
         market: MarketState,
         features: FeatureVector,
     ) -> None:
+        if pair.max_resting_seconds == 0:
+            await self._process_immediate_spread_capture_intent(pair, market, features)
+            return
+
         as_of = datetime.now(timezone.utc)
         yes_order_id = self._submit_resting_order_if_allowed(
             pair.yes_intent,
@@ -334,6 +353,21 @@ class TradingRuntime:
             pair.pair_id,
             yes_order_id,
             no_order_id,
+        )
+
+    async def _process_immediate_spread_capture_intent(
+        self,
+        pair: SpreadCaptureIntent,
+        market: MarketState,
+        features: FeatureVector,
+    ) -> None:
+        yes_fill = await self._process_intent(pair.yes_intent, market, features)
+        no_fill = await self._process_intent(pair.no_intent, market, features)
+        logger.info(
+            "Immediate spread capture pair %s processed: yes_fill=%s no_fill=%s",
+            pair.pair_id,
+            yes_fill.status.value if yes_fill is not None else None,
+            no_fill.status.value if no_fill is not None else None,
         )
 
     def _submit_resting_order_if_allowed(
@@ -567,6 +601,8 @@ class TradingRuntime:
                 "market": {
                     "yes_bid": str(market.yes_bid) if market.yes_bid is not None else None,
                     "yes_ask": str(market.yes_ask) if market.yes_ask is not None else None,
+                    "no_bid": str(market.no_bid) if market.no_bid is not None else None,
+                    "no_ask": str(market.no_ask) if market.no_ask is not None else None,
                     "last_price": str(market.last_price) if market.last_price is not None else None,
                 },
             },

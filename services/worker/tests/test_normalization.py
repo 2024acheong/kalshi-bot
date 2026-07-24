@@ -3,7 +3,12 @@ from decimal import Decimal
 
 from core.schemas.market import MarketStatus
 from worker.cache import serialize_market_state
-from worker.normalization import market_catalog_row, market_snapshot_row, normalize_market
+from worker.normalization import (
+    market_catalog_row,
+    market_snapshot_row,
+    normalize_market,
+    normalize_ws_ticker_message,
+)
 
 
 def test_normalize_market_maps_kalshi_payload() -> None:
@@ -17,6 +22,8 @@ def test_normalize_market_maps_kalshi_payload() -> None:
         "yes_ask": "46",
         "yes_bid_size": 120,
         "yes_ask_size": 80,
+        "no_bid_dollars": "0.5400",
+        "no_ask_dollars": "0.5600",
         "last_price": "45",
         "last_price_ts": "2026-04-05T13:00:00Z",
         "volume": 5000,
@@ -30,6 +37,10 @@ def test_normalize_market_maps_kalshi_payload() -> None:
     assert market.timestamp == datetime(2026, 4, 5, 13, 0, tzinfo=timezone.utc)
     assert market.yes_bid == Decimal("0.44")
     assert market.yes_ask == Decimal("0.46")
+    assert market.no_bid == Decimal("0.5400")
+    assert market.no_ask == Decimal("0.5600")
+    assert market.no_bid_size == 80
+    assert market.no_ask_size == 120
     assert market.status == MarketStatus.OPEN
     assert market.raw_sequence == 18
 
@@ -39,6 +50,8 @@ def test_normalize_market_maps_kalshi_payload() -> None:
     assert catalog_row["ticker"] == market.ticker
     assert catalog_row["status"] == "open"
     assert snapshot_row["last_price"] == Decimal("0.45")
+    assert snapshot_row["no_bid"] == Decimal("0.5400")
+    assert snapshot_row["no_ask"] == Decimal("0.5600")
     assert snapshot_row["source"] == "rest_poll"
 
 
@@ -95,3 +108,27 @@ def test_market_snapshot_row_includes_raw_sequence() -> None:
     row = market_snapshot_row(market)
 
     assert row["raw_sequence"] == 42
+
+
+def test_normalize_ws_orderbook_snapshot_maps_no_side() -> None:
+    market = normalize_ws_ticker_message(
+        {
+            "type": "orderbook_snapshot",
+            "market_ticker": "KXBTC-26APR-B90000",
+            "seq": 7,
+            "msg": {
+                "yes": [[40, 12], [42, 10]],
+                "no": [[55, 8], [52, 20]],
+            },
+        }
+    )
+
+    assert market is not None
+    assert market.yes_bid == Decimal("0.42")
+    assert market.yes_bid_size == 10
+    assert market.no_bid == Decimal("0.55")
+    assert market.no_bid_size == 8
+    assert market.yes_ask == Decimal("0.45")
+    assert market.yes_ask_size == 8
+    assert market.no_ask == Decimal("0.58")
+    assert market.no_ask_size == 10
