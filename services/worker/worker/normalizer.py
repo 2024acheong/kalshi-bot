@@ -53,26 +53,60 @@ def _parse_status(value: Any) -> MarketStatus:
     return MarketStatus.OPEN
 
 
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
 def normalize_market(raw_market: dict[str, Any], *, source: str) -> MarketState:
     timestamp = (
         _parse_datetime(raw_market.get("last_price_ts"))
+        or _parse_datetime(raw_market.get("updated_time"))
         or _parse_datetime(raw_market.get("updated_at"))
         or datetime.now(timezone.utc)
+    )
+    yes_bid_size = _parse_int(
+        _first_present(raw_market.get("yes_bid_size"), raw_market.get("yes_bid_size_fp"))
+    )
+    yes_ask_size = _parse_int(
+        _first_present(raw_market.get("yes_ask_size"), raw_market.get("yes_ask_size_fp"))
+    )
+    no_bid_size = _parse_int(
+        _first_present(raw_market.get("no_bid_size"), raw_market.get("no_bid_size_fp"))
+    )
+    no_ask_size = _parse_int(
+        _first_present(raw_market.get("no_ask_size"), raw_market.get("no_ask_size_fp"))
     )
     return MarketState(
         ticker=str(raw_market["ticker"]),
         timestamp=timestamp,
-        yes_bid=_parse_price(raw_market.get("yes_bid")),
-        yes_ask=_parse_price(raw_market.get("yes_ask")),
-        yes_bid_size=_parse_int(raw_market.get("yes_bid_size")),
-        yes_ask_size=_parse_int(raw_market.get("yes_ask_size")),
-        last_price=_parse_price(raw_market.get("last_price")),
+        yes_bid=_parse_price(
+            _first_present(raw_market.get("yes_bid"), raw_market.get("yes_bid_dollars"))
+        ),
+        yes_ask=_parse_price(
+            _first_present(raw_market.get("yes_ask"), raw_market.get("yes_ask_dollars"))
+        ),
+        yes_bid_size=yes_bid_size,
+        yes_ask_size=yes_ask_size,
+        last_price=_parse_price(
+            _first_present(raw_market.get("last_price"), raw_market.get("last_price_dollars"))
+        ),
         volume_24h=_parse_int(raw_market.get("volume") or raw_market.get("volume_24h")),
         open_interest=_parse_int(raw_market.get("open_interest")),
         close_time=_parse_datetime(raw_market.get("close_time")),
         status=_parse_status(raw_market.get("status")),
         source=source,
         raw_sequence=_parse_int(raw_market.get("seq") or raw_market.get("sequence")),
+        no_bid=_parse_price(
+            _first_present(raw_market.get("no_bid"), raw_market.get("no_bid_dollars"))
+        ),
+        no_ask=_parse_price(
+            _first_present(raw_market.get("no_ask"), raw_market.get("no_ask_dollars"))
+        ),
+        no_bid_size=no_bid_size if no_bid_size is not None else yes_ask_size,
+        no_ask_size=no_ask_size if no_ask_size is not None else yes_bid_size,
     )
 
 
@@ -92,17 +126,36 @@ def normalize_ws_ticker_message(msg: dict[str, Any]) -> MarketState | None:
         or _parse_datetime(payload.get("ts"))
         or datetime.now(timezone.utc)
     )
+    yes_bid_size = _parse_int(
+        _first_present(payload.get("yes_bid_size"), payload.get("yes_bid_size_fp"))
+    )
+    yes_ask_size = _parse_int(
+        _first_present(payload.get("yes_ask_size"), payload.get("yes_ask_size_fp"))
+    )
+    no_bid_size = _parse_int(
+        _first_present(payload.get("no_bid_size"), payload.get("no_bid_size_fp"))
+    )
+    no_ask_size = _parse_int(
+        _first_present(payload.get("no_ask_size"), payload.get("no_ask_size_fp"))
+    )
     return MarketState(
         ticker=str(ticker),
         timestamp=timestamp,
-        yes_bid=_parse_price(payload.get("yes_bid") or payload.get("yes_bid_dollars")),
-        yes_ask=_parse_price(payload.get("yes_ask") or payload.get("yes_ask_dollars")),
-        yes_bid_size=_parse_int(payload.get("yes_bid_size") or payload.get("yes_bid_size_fp")),
-        yes_ask_size=_parse_int(payload.get("yes_ask_size") or payload.get("yes_ask_size_fp")),
+        yes_bid=_parse_price(
+            _first_present(payload.get("yes_bid"), payload.get("yes_bid_dollars"))
+        ),
+        yes_ask=_parse_price(
+            _first_present(payload.get("yes_ask"), payload.get("yes_ask_dollars"))
+        ),
+        yes_bid_size=yes_bid_size,
+        yes_ask_size=yes_ask_size,
         last_price=_parse_price(
-            payload.get("last_price")
-            or payload.get("price")
-            or payload.get("price_dollars")
+            _first_present(
+                payload.get("last_price"),
+                payload.get("last_price_dollars"),
+                payload.get("price"),
+                payload.get("price_dollars"),
+            )
         ),
         volume_24h=_parse_int(
             payload.get("volume") or payload.get("volume_fp") or payload.get("dollar_volume")
@@ -116,6 +169,14 @@ def normalize_ws_ticker_message(msg: dict[str, Any]) -> MarketState | None:
         status=MarketStatus.OPEN,
         source="websocket",
         raw_sequence=_parse_int(msg.get("seq")),
+        no_bid=_parse_price(
+            _first_present(payload.get("no_bid"), payload.get("no_bid_dollars"))
+        ),
+        no_ask=_parse_price(
+            _first_present(payload.get("no_ask"), payload.get("no_ask_dollars"))
+        ),
+        no_bid_size=no_bid_size if no_bid_size is not None else yes_ask_size,
+        no_ask_size=no_ask_size if no_ask_size is not None else yes_bid_size,
     )
 
 
@@ -130,6 +191,7 @@ def _normalize_ws_orderbook_snapshot(msg: dict[str, Any]) -> MarketState | None:
     yes_bid_price, yes_bid_size = _best_book_level(yes_book)
     no_bid_price, no_bid_size = _best_book_level(no_book)
     yes_ask = Decimal("1") - no_bid_price if no_bid_price is not None else None
+    no_ask = Decimal("1") - yes_bid_price if yes_bid_price is not None else None
 
     timestamp = (
         _parse_datetime(payload.get("time"))
@@ -150,6 +212,10 @@ def _normalize_ws_orderbook_snapshot(msg: dict[str, Any]) -> MarketState | None:
         status=MarketStatus.OPEN,
         source="websocket",
         raw_sequence=_parse_int(msg.get("seq")),
+        no_bid=no_bid_price,
+        no_ask=no_ask,
+        no_bid_size=no_bid_size,
+        no_ask_size=yes_bid_size,
     )
 
 
@@ -211,6 +277,10 @@ def market_snapshot_row(market: MarketState) -> dict[str, Any]:
         "yes_ask": market.yes_ask,
         "yes_bid_size": market.yes_bid_size,
         "yes_ask_size": market.yes_ask_size,
+        "no_bid": market.no_bid,
+        "no_ask": market.no_ask,
+        "no_bid_size": market.no_bid_size,
+        "no_ask_size": market.no_ask_size,
         "last_price": market.last_price,
         "volume_24h": market.volume_24h,
         "open_interest": market.open_interest,

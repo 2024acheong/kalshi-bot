@@ -57,10 +57,10 @@ class PostgresMarketRepository:
                 """
                 INSERT INTO market_snapshots (
                     ticker, timestamp, yes_bid, yes_ask, yes_bid_size,
-                    yes_ask_size, last_price, volume_24h, open_interest,
-                    source, raw_sequence
+                    yes_ask_size, no_bid, no_ask, no_bid_size, no_ask_size,
+                    last_price, volume_24h, open_interest, source, raw_sequence
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 """,
                 row["ticker"],
                 row["timestamp"],
@@ -68,6 +68,10 @@ class PostgresMarketRepository:
                 row["yes_ask"],
                 row["yes_bid_size"],
                 row["yes_ask_size"],
+                row["no_bid"],
+                row["no_ask"],
+                row["no_bid_size"],
+                row["no_ask_size"],
                 row["last_price"],
                 row["volume_24h"],
                 row["open_interest"],

@@ -282,6 +282,18 @@ class IngestionService:
             status=market.status,
             source=market.source,
             raw_sequence=market.raw_sequence,
+            no_bid=market.no_bid if market.no_bid is not None else catalog_market.no_bid,
+            no_ask=market.no_ask if market.no_ask is not None else catalog_market.no_ask,
+            no_bid_size=(
+                market.no_bid_size
+                if market.no_bid_size is not None
+                else catalog_market.no_bid_size
+            ),
+            no_ask_size=(
+                market.no_ask_size
+                if market.no_ask_size is not None
+                else catalog_market.no_ask_size
+            ),
         )
 
     async def _notify_market_update(self, market: MarketState) -> None:
@@ -343,6 +355,7 @@ class IngestionService:
         yes_bid, yes_bid_size = self._best_book_level(orderbook["yes"])
         no_bid, no_bid_size = self._best_book_level(orderbook["no"])
         yes_ask = Decimal("1") - no_bid if no_bid is not None else None
+        no_ask = Decimal("1") - yes_bid if yes_bid is not None else None
 
         return MarketState(
             ticker=ticker,
@@ -358,6 +371,10 @@ class IngestionService:
             status=MarketStatus.OPEN,
             source="websocket",
             raw_sequence=self._parse_int(message.get("seq")),
+            no_bid=no_bid,
+            no_ask=no_ask,
+            no_bid_size=no_bid_size,
+            no_ask_size=yes_bid_size,
         )
 
     def _message_ticker(self, message: dict[str, Any]) -> str | None:

@@ -23,7 +23,7 @@ from core.strategies.calibration_mispricing import (
 )
 from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
-from core.strategies.spread_capture import SpreadCaptureIntent
+from core.strategies.spread_capture import SpreadCaptureIntent, SpreadCaptureStrategy
 from worker.runtime import TradingRuntime
 from worker.strategies.dummy import DummyStrategy
 
@@ -355,6 +355,62 @@ async def test_runtime_processes_spread_capture_pair(monkeypatch) -> None:
     open_orders = runtime._resting_orders.get_open_orders()
     assert [order.order_id for order in open_orders] == ["yes-order", "no-order"]
     assert {order.pair_id for order in open_orders} == {"pair-1"}
+
+
+@pytest.mark.anyio
+async def test_runtime_processes_spread_capture_arbitrage_immediately(monkeypatch) -> None:
+    market = make_market(
+        yes_ask=Decimal("0.40"),
+        no_bid=Decimal("0.50"),
+        no_ask=Decimal("0.45"),
+        no_bid_size=100,
+        no_ask_size=100,
+    )
+    strategy = SpreadCaptureStrategy(qty_per_leg=5)
+    strategy.evaluate = MagicMock(return_value=None)
+    risk_engine = MagicMock()
+    risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
+        intent, RiskDecision.ALLOW
+    )
+    fill_results = [
+        FillResult(
+            order_id="yes-order",
+            fill_price=Decimal("0.40"),
+            fill_qty=5,
+            fee=Decimal("0.35"),
+            fill_latency_ms=200,
+            fill_type="paper",
+            status=OrderIntentStatus.FILLED,
+        ),
+        FillResult(
+            order_id="no-order",
+            fill_price=Decimal("0.45"),
+            fill_qty=5,
+            fee=Decimal("0.35"),
+            fill_latency_ms=200,
+            fill_type="paper",
+            status=OrderIntentStatus.FILLED,
+        ),
+    ]
+    paper_adapter = MagicMock()
+    paper_adapter.submit_order.side_effect = fill_results
+    persist_order = MagicMock(side_effect=["yes-order", "no-order"])
+    persist_fill = MagicMock()
+    monkeypatch.setattr("worker.runtime.persist_order", persist_order)
+    monkeypatch.setattr("worker.runtime.persist_fill", persist_fill)
+
+    runtime = make_runtime(
+        strategy=strategy,
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+    )
+    await runtime.on_market_update(market)
+
+    assert persist_order.call_count == 2
+    assert persist_fill.call_count == 2
+    assert paper_adapter.submit_order.call_count == 2
+    assert runtime._resting_orders.get_open_orders() == []
+    strategy.evaluate.assert_not_called()
 
 
 @pytest.mark.anyio
