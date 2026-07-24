@@ -20,6 +20,21 @@ export function formatNumber(value: number | string | null | undefined) {
   }).format(parsed)
 }
 
+export function formatPercent(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === '') {
+    return '-'
+  }
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return String(value)
+  }
+  return new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 1,
+    style: 'percent',
+  }).format(parsed)
+}
+
 export function formatDateTime(value: string | null | undefined) {
   if (!value) {
     return '-'

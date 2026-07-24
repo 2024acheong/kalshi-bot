@@ -229,6 +229,13 @@ select {
   letter-spacing: 0;
 }
 
+.cardTitle {
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.35;
+  margin: 0 0 0.35rem;
+}
+
 .cardMeta {
   color: var(--muted);
   font-size: 0.75rem;
@@ -342,6 +349,13 @@ select {
   margin-bottom: 1rem;
 }
 
+.toolbarControls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
 .select {
   background: rgba(23, 32, 51, 0.85);
   border: 1px solid var(--border);
@@ -409,7 +423,12 @@ select {
   grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
 }
 
-.marketCard {
+.strategyGrid {
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+}
+
+.marketCard,
+.strategyCard {
   background: linear-gradient(180deg, rgba(17, 24, 39, 0.96), rgba(13, 18, 29, 0.98));
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -418,7 +437,8 @@ select {
   transition: border-color 160ms ease, transform 160ms ease;
 }
 
-.marketCard:hover {
+.marketCard:hover,
+.strategyCard:hover {
   border-color: rgba(34, 211, 238, 0.35);
   transform: translateY(-1px);
 }

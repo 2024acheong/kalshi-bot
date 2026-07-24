@@ -1,4 +1,5 @@
-import { formatCurrency, formatDateTime, formatNumber } from '@/components/Format'
+import { FillsFilter, type FillTableRow } from '@/components/FillsFilter'
+import { formatCurrency } from '@/components/Format'
 import { supabase } from '@/lib/supabase'
 
 export const dynamic = 'force-dynamic'
@@ -14,12 +15,27 @@ type FillWithOrder = {
     | {
         ticker: string | null
         side: string | null
+        run_id: string | null
+        strategy_runs?: RunRelation | RunRelation[] | null
       }
     | {
         ticker: string | null
         side: string | null
+        run_id: string | null
+        strategy_runs?: RunRelation | RunRelation[] | null
       }[]
     | null
+}
+
+type ConfigRelation = {
+  name: string | null
+  version: number | null
+}
+
+type RunRelation = {
+  id: string
+  mode: string | null
+  strategy_configs?: ConfigRelation | ConfigRelation[] | null
 }
 
 function parentOrder(fill: FillWithOrder) {
@@ -29,9 +45,8 @@ function parentOrder(fill: FillWithOrder) {
   return fill.orders ?? null
 }
 
-type ParentOrder = {
-    ticker: string | null
-    side: string | null
+function firstRelation<T>(value: T | T[] | null | undefined) {
+  return Array.isArray(value) ? value[0] ?? null : value ?? null
 }
 
 export default async function FillsPage() {
@@ -46,7 +61,16 @@ export default async function FillsPage() {
       created_at,
       orders (
         ticker,
-        side
+        side,
+        run_id,
+        strategy_runs (
+          id,
+          mode,
+          strategy_configs (
+            name,
+            version
+          )
+        )
       )
     `)
     .order('created_at', { ascending: false })
@@ -61,6 +85,24 @@ export default async function FillsPage() {
     0,
   )
   const feesPaid = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
+  const tableRows: FillTableRow[] = fills.map((fill) => {
+    const order = parentOrder(fill)
+    const run = firstRelation(order?.strategy_runs)
+    const config = firstRelation(run?.strategy_configs)
+    return {
+      id: fill.id,
+      ticker: order?.ticker ?? null,
+      side: order?.side ?? null,
+      strategy_name: config?.name ?? null,
+      run_id: order?.run_id ?? run?.id ?? null,
+      mode: run?.mode ?? null,
+      fill_price: fill.fill_price,
+      fill_qty: fill.fill_qty,
+      fee: fill.fee,
+      fill_type: fill.fill_type,
+      created_at: fill.created_at,
+    }
+  })
 
   return (
     <>
@@ -92,41 +134,7 @@ export default async function FillsPage() {
         </div>
       </section>
 
-      <div className="tableWrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Side</th>
-              <th>Fill Price</th>
-              <th>Fill Qty</th>
-              <th>Fee</th>
-              <th>Fill Type</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {fills.map((fill) => (
-              <FillRow key={fill.id} fill={fill} />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <FillsFilter fills={tableRows} />
     </>
-  )
-}
-
-function FillRow({ fill }: { fill: FillWithOrder }) {
-  const order: ParentOrder | null = parentOrder(fill)
-  return (
-    <tr>
-      <td className="blue">{order?.ticker ?? '-'}</td>
-      <td>{order?.side ?? '-'}</td>
-      <td>{formatNumber(fill.fill_price)}</td>
-      <td>{formatNumber(fill.fill_qty)}</td>
-      <td>{formatNumber(fill.fee)}</td>
-      <td>{fill.fill_type ?? '-'}</td>
-      <td>{formatDateTime(fill.created_at)}</td>
-    </tr>
   )
 }
