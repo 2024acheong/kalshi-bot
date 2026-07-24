@@ -8,13 +8,23 @@ import pytest
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
 from services.models.shared.artifact_store import save_artifact
 from services.models.weather.estimator import WeatherEnsembleEstimator, compute_ensemble_features
+from services.models.weather.market_outcomes import (
+    build_weather_market_outcome_row,
+    collect_weather_market_outcomes,
+    store_weather_market_outcome,
+)
 from services.models.weather.outcomes import (
     chunk_date_range_by_year,
     parse_ncei_daily_summary_outcome,
     parse_nws_cli_outcome,
     store_temperature_outcome,
 )
-from services.models.weather.train import _canonical_city_code, _label_from_title
+from services.models.weather.train import (
+    MIN_REAL_TRAINING_ROWS,
+    _canonical_city_code,
+    _label_from_title,
+    _load_real_training_rows,
+)
 
 
 def make_market(ticker: str) -> MarketState:
@@ -228,6 +238,216 @@ def test_label_from_title_handles_greater_less_and_between() -> None:
 def test_training_city_alias_matches_nyc_outcomes_to_ny_tickers() -> None:
     assert _canonical_city_code("NYC") == "NY"
     assert _canonical_city_code("NY") == "NY"
+
+
+def test_build_weather_market_outcome_row_labels_threshold_market() -> None:
+    market = {
+        "ticker": "KXHIGHNY-26MAY21-T75",
+        "title": "Will the high temp in NYC be >75°?",
+        "status": "resolved",
+        "close_time": "2026-05-22T04:00:00Z",
+    }
+    actual = {
+        "city_code": "NYC",
+        "outcome_date": "2026-05-21",
+        "high_temp_f": 76,
+        "low_temp_f": 68,
+    }
+
+    outcome = build_weather_market_outcome_row(market, actual)
+
+    assert outcome is not None
+    assert outcome["ticker"] == "KXHIGHNY-26MAY21-T75"
+    assert outcome["city_code"] == "NY"
+    assert outcome["strike_type"] == "greater"
+    assert outcome["threshold_f"] == pytest.approx(75)
+    assert outcome["actual_value_f"] == pytest.approx(76)
+    assert outcome["yes_resolved"] is True
+
+
+def test_build_weather_market_outcome_row_labels_between_market() -> None:
+    market = {
+        "ticker": "KXLOWNY-26MAY21-B67.5",
+        "title": "Will the low temp in NYC be 67-68°?",
+        "status": "resolved",
+    }
+    actual = {
+        "city_code": "NY",
+        "outcome_date": date(2026, 5, 21),
+        "high_temp_f": 76,
+        "low_temp_f": 68,
+    }
+
+    outcome = build_weather_market_outcome_row(market, actual)
+
+    assert outcome is not None
+    assert outcome["strike_type"] == "between"
+    assert outcome["threshold_f"] == pytest.approx(67.5)
+    assert outcome["lower_f"] == pytest.approx(67)
+    assert outcome["upper_f"] == pytest.approx(68)
+    assert outcome["yes_resolved"] is True
+
+
+def test_build_weather_market_outcome_row_returns_none_for_ambiguous_threshold() -> None:
+    market = {
+        "ticker": "KXHIGHNY-26MAY21-T75",
+        "title": "Will the high temp in NYC settle at 75°?",
+        "status": "resolved",
+    }
+    actual = {
+        "city_code": "NY",
+        "outcome_date": "2026-05-21",
+        "high_temp_f": 76,
+        "low_temp_f": 68,
+    }
+
+    assert build_weather_market_outcome_row(market, actual) is None
+
+
+def test_store_weather_market_outcome_upserts_by_ticker(monkeypatch) -> None:
+    class FakeExecute:
+        data = [{"id": 1}]
+
+    class FakeTable:
+        def __init__(self) -> None:
+            self.payload = None
+            self.conflict = None
+
+        def upsert(self, payload, on_conflict):
+            self.payload = payload
+            self.conflict = on_conflict
+            return self
+
+        def execute(self):
+            return FakeExecute()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.table_name = None
+            self.table_obj = FakeTable()
+
+        def table(self, name):
+            self.table_name = name
+            return self.table_obj
+
+    fake = FakeClient()
+    monkeypatch.setattr(
+        "services.models.weather.market_outcomes.get_supabase_client",
+        lambda: fake,
+    )
+    row = {
+        "ticker": "KXHIGHNY-26MAY21-T75",
+        "series": "KXHIGHNY",
+        "kind": "HIGH",
+        "city_code": "NY",
+        "target_date": "2026-05-21",
+        "strike_type": "greater",
+        "threshold_f": 75,
+        "actual_value_f": 76,
+        "yes_resolved": True,
+    }
+
+    assert store_weather_market_outcome(row) == 1
+
+    assert fake.table_name == "weather_market_outcomes"
+    assert fake.table_obj.conflict == "ticker"
+    assert fake.table_obj.payload["ticker"] == "KXHIGHNY-26MAY21-T75"
+
+
+def test_collect_weather_market_outcomes_matches_catalog_to_actuals(monkeypatch) -> None:
+    stored_rows = []
+
+    monkeypatch.setattr(
+        "services.models.weather.market_outcomes._fetch_temperature_outcomes",
+        lambda: [
+            {
+                "city_code": "NYC",
+                "outcome_date": "2026-05-21",
+                "high_temp_f": 76,
+                "low_temp_f": 68,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "services.models.weather.market_outcomes.store_weather_market_outcome",
+        lambda row: stored_rows.append(row) or 1,
+    )
+
+    stored = collect_weather_market_outcomes(
+        [
+            {
+                "ticker": "KXHIGHNY-26MAY21-T75",
+                "title": "Will the high temp in NYC be >75°?",
+                "status": "resolved",
+            }
+        ]
+    )
+
+    assert stored == 1
+    assert stored_rows[0]["yes_resolved"] is True
+
+
+def test_load_real_weather_training_rows_uses_market_outcomes(monkeypatch) -> None:
+    class FakeExecute:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeQuery:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+
+        def select(self, columns):
+            return self
+
+        def limit(self, count):
+            return self
+
+        def execute(self):
+            if self.table_name == "weather_market_outcomes":
+                rows = []
+                for index in range(MIN_REAL_TRAINING_ROWS):
+                    threshold = 75 if index % 2 == 0 else 95
+                    rows.append(
+                        {
+                            "ticker": f"KXHIGHNY-26MAY21-T{threshold}",
+                            "kind": "HIGH",
+                            "city_code": "NY",
+                            "target_date": "2026-05-21",
+                            "strike_type": "greater",
+                            "threshold_f": threshold,
+                            "lower_f": None,
+                            "upper_f": None,
+                            "yes_resolved": index % 2 == 0,
+                        }
+                    )
+                return FakeExecute(rows)
+
+            snapshots = []
+            for member, temperature in enumerate([24.0, 25.0, 26.0], start=1):
+                snapshots.append(
+                    {
+                        "location_lat": 40.783,
+                        "location_lon": -73.967,
+                        "forecast_issued_at": "2026-05-20T00:00:00+00:00",
+                        "target_datetime": "2026-05-21T12:00:00+00:00",
+                        "ensemble_member": member,
+                        "temperature_c": temperature,
+                    }
+                )
+            return FakeExecute(snapshots)
+
+    class FakeClient:
+        def table(self, table_name):
+            return FakeQuery(table_name)
+
+    monkeypatch.setattr("services.models.weather.train.get_supabase_client", lambda: FakeClient())
+
+    rows = _load_real_training_rows()
+
+    assert rows is not None
+    x_values, y_values = rows
+    assert len(x_values) == MIN_REAL_TRAINING_ROWS
+    assert set(y_values.tolist()) == {0, 1}
 
 
 def test_estimator_clips_output_to_valid_range(monkeypatch) -> None:
