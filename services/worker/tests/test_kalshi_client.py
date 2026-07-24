@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from worker.kalshi.client import KalshiRestClient, fetch_top_liquid_tickers
@@ -70,3 +71,34 @@ async def test_fetch_top_liquid_tickers_filters_and_sorts(monkeypatch) -> None:
 
     assert tickers == ["FIRST", "SECOND", "THIRD", "FOURTH"]
     assert calls == [None, "next-page"]
+
+
+@pytest.mark.anyio
+async def test_list_markets_retries_rate_limit(monkeypatch) -> None:
+    request = httpx.Request("GET", "https://example.test/markets")
+    responses = [
+        httpx.Response(429, headers={"Retry-After": "0"}, request=request),
+        httpx.Response(
+            200,
+            json={"markets": [{"ticker": "KXTEST"}], "cursor": None},
+            request=request,
+        ),
+    ]
+    sleeps = []
+
+    class FakeHttpClient:
+        async def get(self, url, params=None):
+            del url, params
+            return responses.pop(0)
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("worker.kalshi.client.asyncio.sleep", fake_sleep)
+    client = KalshiRestClient(FakeHttpClient(), "https://example.test")
+
+    markets, cursor = await client.list_markets()
+
+    assert markets == [{"ticker": "KXTEST"}]
+    assert cursor is None
+    assert sleeps == [0.0]
