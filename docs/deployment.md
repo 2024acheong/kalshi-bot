@@ -37,6 +37,8 @@ Railway cron schedules are UTC. Cron services should finish and exit; the worker
 
 For each Railway service, point config-as-code at the matching file path, for example `/railway/worker.toml`. In a monorepo, Railway's root directory and config-file path are separate settings.
 
+The root `nixpacks.toml` forces Railway's Nixpacks builder to include Python even though the monorepo also has Node workspace files.
+
 ## Required Variables
 
 Set these on Railway services that need them:
