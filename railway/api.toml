@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install -U pip && pip install -e packages/core -e apps/api"
+buildCommand = "python -m pip install -U pip && python -m pip install -e packages/core -e apps/api"
 watchPatterns = [
   "apps/api/**",
   "packages/core/**",
