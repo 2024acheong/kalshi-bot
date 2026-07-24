@@ -15,6 +15,7 @@ from worker.execution_repository import (
     load_open_positions,
     persist_open_position,
     persist_signal,
+    persist_worker_heartbeat,
 )
 from worker.storage import _get_supabase_credentials
 
@@ -120,6 +121,21 @@ def test_create_strategy_run_inserts_config_and_mode(monkeypatch) -> None:
         {
             "config_id": "config-1",
             "mode": "paper",
+        }
+    ]
+
+
+def test_persist_worker_heartbeat_inserts_system_event(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["system_events"] = FakeTable(response_id="event-1")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+
+    persist_worker_heartbeat({"watched_tickers": ["KXTEST"]})
+
+    assert fake.tables["system_events"].insert_calls == [
+        {
+            "event_type": "worker_heartbeat",
+            "payload_json": {"watched_tickers": ["KXTEST"]},
         }
     ]
 
