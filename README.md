@@ -26,3 +26,12 @@ Build one end-to-end slice:
 - Partner A: `apps/web`, `apps/api`, `packages/contracts`
 - Partner B: `services/worker`, `services/research`, `packages/core`
 - Shared: schema decisions, infra, migrations, docs
+
+## Deployment
+
+Deployment is split across Vercel and Railway:
+
+- Vercel serves `apps/web`.
+- Railway runs the FastAPI control plane, the always-on paper-trading worker, and scheduled ingestion/outcome/training jobs.
+
+See `docs/deployment.md` for service config files, cron schedules, variables, and CI/CD notes.

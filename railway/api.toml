@@ -1,0 +1,15 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "pip install -U pip && pip install -e packages/core -e apps/api"
+watchPatterns = [
+  "apps/api/**",
+  "packages/core/**",
+  "pyproject.toml",
+]
+
+[deploy]
+startCommand = "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

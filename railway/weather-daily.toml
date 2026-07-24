@@ -1,0 +1,14 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "pip install -U pip && pip install -e packages/core -e services/models"
+watchPatterns = [
+  "scripts/jobs/**",
+  "services/models/**",
+  "packages/core/**",
+  "pyproject.toml",
+]
+
+[deploy]
+startCommand = "python scripts/jobs/weather_daily.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 1
