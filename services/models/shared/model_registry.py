@@ -60,14 +60,22 @@ def get_latest_model(name: str) -> dict[str, Any] | None:
     """
     Return the most recently trained registry row for name, or None.
     """
+    rows = get_recent_models(name, limit=1)
+    return rows[0] if rows else None
+
+
+def get_recent_models(name: str, limit: int = 10) -> list[dict[str, Any]]:
+    """
+    Return recent registry rows for name, newest first.
+    """
     response = (
         get_supabase_client()
         .table("model_registry")
         .select("id,version,artifact_path,train_metrics_json")
         .eq("name", name)
         .order("trained_at", desc=True)
-        .limit(1)
+        .limit(limit)
         .execute()
     )
     rows = getattr(response, "data", None) or []
-    return rows[0] if rows else None
+    return list(rows)
