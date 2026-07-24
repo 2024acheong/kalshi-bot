@@ -20,6 +20,7 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install -U pip
+          python -m pip install pytest pytest-asyncio
           python -m pip install -e packages/core -e apps/api -e services/worker -e services/research -e services/models
       - name: Run tests
         run: python -m pytest
@@ -39,4 +40,10 @@ jobs:
       - name: Install JS packages
         run: pnpm install --frozen-lockfile
       - name: Build web app
+        env:
+          CI: true
+          SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SECRET_KEY: ci-build-placeholder
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ci-build-placeholder
         run: pnpm --dir apps/web build
