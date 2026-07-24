@@ -74,7 +74,7 @@ def test_artifact_store_roundtrip(tmp_path, monkeypatch) -> None:
 
 
 def test_estimator_returns_none_with_no_registered_model(monkeypatch) -> None:
-    monkeypatch.setattr("services.models.weather.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.weather.estimator.get_recent_models", lambda name: [])
 
     estimator = WeatherEnsembleEstimator()
 
@@ -82,7 +82,7 @@ def test_estimator_returns_none_with_no_registered_model(monkeypatch) -> None:
 
 
 def test_estimator_returns_none_for_unparseable_ticker(monkeypatch) -> None:
-    monkeypatch.setattr("services.models.weather.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.weather.estimator.get_recent_models", lambda name: [])
     estimator = WeatherEnsembleEstimator()
 
     assert estimator._parse_ticker("FED-23DEC-T3.00") is None
@@ -90,7 +90,7 @@ def test_estimator_returns_none_for_unparseable_ticker(monkeypatch) -> None:
 
 
 def test_ticker_parsing_extracts_expected_fields(monkeypatch) -> None:
-    monkeypatch.setattr("services.models.weather.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.weather.estimator.get_recent_models", lambda name: [])
     estimator = WeatherEnsembleEstimator()
 
     parsed = estimator._parse_ticker("KXHIGHMIA-26MAR24-B80.5")
@@ -105,7 +105,7 @@ def test_ticker_parsing_extracts_expected_fields(monkeypatch) -> None:
 
 
 def test_ticker_parsing_marks_threshold_direction_as_title_dependent(monkeypatch) -> None:
-    monkeypatch.setattr("services.models.weather.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.weather.estimator.get_recent_models", lambda name: [])
     estimator = WeatherEnsembleEstimator()
 
     parsed = estimator._parse_ticker("KXHIGHNY-26MAY21-T68")
@@ -469,7 +469,7 @@ def test_estimator_clips_output_to_valid_range(monkeypatch) -> None:
             "temperature_c": 29.0,
         },
     ]
-    monkeypatch.setattr("services.models.weather.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.weather.estimator.get_recent_models", lambda name: [])
     estimator = WeatherEnsembleEstimator()
     estimator.model = FakeModel()
     monkeypatch.setattr(estimator, "_fetch_latest_ensemble_rows", lambda parsed: rows)

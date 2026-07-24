@@ -56,7 +56,7 @@ def make_features() -> FeatureVector:
 
 
 def test_estimator_returns_none_with_no_registered_model(monkeypatch) -> None:
-    monkeypatch.setattr("services.models.macro.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.macro.estimator.get_recent_models", lambda name: [])
 
     estimator = MacroEstimator()
 
@@ -64,7 +64,7 @@ def test_estimator_returns_none_with_no_registered_model(monkeypatch) -> None:
 
 
 def test_estimator_returns_none_for_unparseable_ticker(monkeypatch) -> None:
-    monkeypatch.setattr("services.models.macro.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.macro.estimator.get_recent_models", lambda name: [])
     estimator = MacroEstimator()
 
     assert estimator._parse_ticker("KXFEDDECISION-28JAN-H25") is None
@@ -114,7 +114,7 @@ def test_ticker_parsing_extracts_expected_fields(
     threshold: float,
     target_date: date,
 ) -> None:
-    monkeypatch.setattr("services.models.macro.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.macro.estimator.get_recent_models", lambda name: [])
     estimator = MacroEstimator()
 
     parsed = estimator._parse_ticker(ticker)
@@ -174,7 +174,7 @@ def test_estimator_returns_none_with_insufficient_history(monkeypatch) -> None:
         def predict(self, values):
             return [0.5]
 
-    monkeypatch.setattr("services.models.macro.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.macro.estimator.get_recent_models", lambda name: [])
     estimator = MacroEstimator()
     estimator.model = FakeModel()
     monkeypatch.setattr(
@@ -200,7 +200,7 @@ def test_estimator_clips_output_to_valid_range(monkeypatch) -> None:
         {"observation_date": "2026-02-01", "value": 115.0},
         {"observation_date": "2026-03-01", "value": 116.0},
     ]
-    monkeypatch.setattr("services.models.macro.estimator.get_latest_model", lambda name: None)
+    monkeypatch.setattr("services.models.macro.estimator.get_recent_models", lambda name: [])
     estimator = MacroEstimator()
     estimator.model = FakeModel()
     monkeypatch.setattr(estimator, "_fetch_series_rows", lambda series_id: rows)

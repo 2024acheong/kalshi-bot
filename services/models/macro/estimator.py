@@ -16,8 +16,8 @@ from services.models.macro.features import (
     derive_metric_observations,
     normalize_threshold_for_metric,
 )
-from services.models.shared.artifact_store import load_artifact
-from services.models.shared.model_registry import get_latest_model, get_supabase_client
+from services.models.shared.artifact_store import load_first_available_artifact
+from services.models.shared.model_registry import get_recent_models, get_supabase_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,12 +64,14 @@ class MacroEstimator(ProbabilityEstimator):
 
     def __init__(self, model_name: str = "macro_threshold_model"):
         try:
-            registry_entry = get_latest_model(model_name)
+            registry_entries = get_recent_models(model_name)
         except Exception as exc:
             LOGGER.warning("No macro model available from registry: %s", exc)
-            registry_entry = None
-        self.model = (
-            None if registry_entry is None else load_artifact(registry_entry["artifact_path"])
+            registry_entries = []
+        self.model = load_first_available_artifact(
+            registry_entries,
+            model_name=model_name,
+            logger=LOGGER,
         )
 
     def _parse_ticker(self, ticker: str) -> dict[str, Any] | None:
