@@ -43,6 +43,7 @@ export default async function OverviewPage() {
     ordersToday,
     fillsToday,
     latestSnapshot,
+    latestHeartbeat,
     recentOrders,
   ] = await Promise.all([
     supabase
@@ -56,6 +57,12 @@ export default async function OverviewPage() {
     supabase
       .from('market_snapshots')
       .select('created_at')
+      .order('created_at', { ascending: false })
+      .limit(1),
+    supabase
+      .from('system_events')
+      .select('created_at,payload_json')
+      .eq('event_type', 'worker_heartbeat')
       .order('created_at', { ascending: false })
       .limit(1),
     supabase
@@ -86,7 +93,9 @@ export default async function OverviewPage() {
   const fills = (fillsToday.data ?? []) as FillRow[]
   const grossExposure = fills.reduce((total, fill) => total + fillGross(fill), 0)
   const feesPaid = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
-  const latestActivity = latestSnapshot.data?.[0]?.created_at ?? null
+  const latestSnapshotAt = latestSnapshot.data?.[0]?.created_at ?? null
+  const latestHeartbeatAt = latestHeartbeat.data?.[0]?.created_at ?? null
+  const latestActivity = latestHeartbeatAt ?? latestSnapshotAt
   const workerIsStale =
     !latestActivity || Date.now() - new Date(latestActivity).getTime() > 2 * 60 * 1000
   const recent = (recentOrders.data ?? []) as OrderRow[]
@@ -133,7 +142,7 @@ export default async function OverviewPage() {
           <div className="cardValue">{formatCurrency(feesPaid)}</div>
         </div>
         <div className="card">
-          <div className="cardLabel">Latest Snapshot</div>
+          <div className="cardLabel">Worker Heartbeat</div>
           <div className="cardValue">{formatAge(latestActivity)}</div>
           <div className="cardMeta">{formatDateTime(latestActivity)}</div>
         </div>

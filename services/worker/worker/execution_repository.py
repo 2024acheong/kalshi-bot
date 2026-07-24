@@ -86,6 +86,14 @@ def load_enabled_strategy_configs() -> list[dict[str, Any]]:
     return getattr(response, "data", None) or []
 
 
+def persist_worker_heartbeat(payload: dict[str, Any]) -> None:
+    row = {
+        "event_type": "worker_heartbeat",
+        "payload_json": payload,
+    }
+    _get_supabase().table("system_events").insert(row).execute()
+
+
 def create_strategy_run(config_id: str, mode: str = "paper") -> str:
     """
     Insert a strategy_runs row and return its id for use as the runtime run_id.

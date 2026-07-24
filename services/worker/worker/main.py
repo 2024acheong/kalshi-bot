@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from worker.execution_repository import (
     load_enabled_strategy_configs,
     load_open_positions,
     load_open_resting_orders,
+    persist_worker_heartbeat,
 )
 from worker.kalshi.client import KalshiRestClient
 from worker.orchestrator import ManagedRuntime, MultiStrategyOrchestrator
@@ -49,6 +51,29 @@ async def discover_worker_tickers(settings: WorkerSettings, strategy_name: str) 
             base_url=settings.kalshi_base_url,
         )
         return await discover_live_tickers(client, _ticker_discovery_config(strategy_name))
+
+
+async def _heartbeat_loop(orchestrator: MultiStrategyOrchestrator) -> None:
+    interval_seconds = int(os.getenv("WORKER_HEARTBEAT_INTERVAL_SECONDS", "60"))
+    while True:
+        try:
+            persist_worker_heartbeat(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "strategy_runs": [
+                        {
+                            "config_id": managed.config_id,
+                            "name": managed.name,
+                            "run_id": managed.run_id,
+                        }
+                        for managed in orchestrator.runtimes
+                    ],
+                    "watched_tickers": orchestrator.watched_tickers,
+                }
+            )
+        except Exception:
+            logger.exception("Failed to persist worker heartbeat")
+        await asyncio.sleep(interval_seconds)
 
 
 def _enabled_or_default_configs() -> list[dict]:
@@ -135,6 +160,7 @@ async def main() -> None:
     try:
         await asyncio.gather(
             ingestion.run(),
+            _heartbeat_loop(orchestrator),
             *(listener.listen() for listener in listeners),
         )
     except KeyboardInterrupt:
