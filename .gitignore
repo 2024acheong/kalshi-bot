@@ -11,3 +11,28 @@ build/
 .DS_Store
 .pytest_cache/
 data/
+services/models/artifacts/
+catboost_info/
+# Python build artifacts
+*.egg-info/
+*.egg
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+
+# Environments
+.env
+.venv/
+venv/
+
+# pnpm
+node_modules/
+
+# Next.js
+apps/web/.next/
+apps/web/out/
+
+# Misc
+.DS_Store
+gambol.txt

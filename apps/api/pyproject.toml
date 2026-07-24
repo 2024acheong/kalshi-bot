@@ -3,7 +3,14 @@ name = "kalshi-api"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.115.0",
-  "uvicorn>=0.34.0",
-  "pydantic>=2.10.0"
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "supabase>=2.4",
+    "python-jose[cryptography]>=3.3",
+    "python-dotenv>=1.0",
+    "pydantic>=2.6",
+    "redis>=5.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["api*", "app*"]
