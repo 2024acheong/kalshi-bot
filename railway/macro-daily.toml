@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install -U pip && pip install -e packages/core -e services/models -e services/worker"
+buildCommand = "python -m pip install -U pip && python -m pip install -e packages/core -e services/models -e services/worker"
 watchPatterns = [
   "scripts/jobs/**",
   "services/models/**",
