@@ -21,6 +21,12 @@ type FillRow = {
   created_at: string | null
 }
 
+type SignalRelation = {
+  signal_payload?: {
+    is_closing_order?: boolean
+  } | null
+}
+
 type OrderRow = {
   id: string
   run_id: string | null
@@ -30,6 +36,7 @@ type OrderRow = {
   qty: number | null
   created_at: string | null
   fills?: FillRow[] | null
+  signals?: SignalRelation | SignalRelation[] | null
   strategy_runs?: RunRelation | RunRelation[] | null
 }
 
@@ -60,6 +67,120 @@ function fillNotional(fill: FillRow) {
   return Number(fill.fill_price ?? 0) * Number(fill.fill_qty ?? 0)
 }
 
+const CHART_COLORS = ['#22d3ee', '#4ade80', '#c084fc', '#fbbf24', '#f87171', '#60a5fa']
+
+type CurvePoint = {
+  timestamp: string
+  value: number
+}
+
+type FillEvent = {
+  runId: string
+  label: string
+  timestamp: string
+  signedValue: number
+}
+
+function signalPayload(order: OrderRow) {
+  return firstRelation(order.signals)?.signal_payload ?? null
+}
+
+function buildFillEvents(orders: OrderRow[]) {
+  const events: FillEvent[] = []
+  for (const order of orders) {
+    const run = firstRelation(order.strategy_runs)
+    const runId = order.run_id ?? run?.id ?? 'unknown'
+    const label = runLabel(run, order.run_id)
+    const isClosing = Boolean(signalPayload(order)?.is_closing_order)
+    for (const fill of order.fills ?? []) {
+      if (!fill.created_at) {
+        continue
+      }
+      const notional = fillNotional(fill)
+      const fee = Number(fill.fee ?? 0)
+      events.push({
+        runId,
+        label,
+        timestamp: fill.created_at,
+        signedValue: isClosing ? notional - fee : -notional - fee,
+      })
+    }
+  }
+  return events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+}
+
+function buildCurves(events: FillEvent[]) {
+  const byRun = new Map<string, { label: string; points: CurvePoint[]; value: number }>()
+  for (const event of events) {
+    const curve = byRun.get(event.runId) ?? { label: event.label, points: [], value: 0 }
+    curve.value += event.signedValue
+    curve.points.push({ timestamp: event.timestamp, value: curve.value })
+    byRun.set(event.runId, curve)
+  }
+  return [...byRun.entries()]
+    .map(([runId, curve], index) => ({ runId, color: CHART_COLORS[index % CHART_COLORS.length], ...curve }))
+    .sort((a, b) => b.value - a.value)
+}
+
+function PerformanceChart({ curves }: { curves: ReturnType<typeof buildCurves> }) {
+  const allPoints = curves.flatMap((curve) => curve.points)
+  if (allPoints.length === 0) {
+    return (
+      <div className="chartEmpty">
+        No fills yet. The performance curve will populate as paper trades execute.
+      </div>
+    )
+  }
+
+  const times = allPoints.map((point) => new Date(point.timestamp).getTime())
+  const values = allPoints.flatMap((point) => [point.value, 0])
+  const minTime = Math.min(...times)
+  const maxTime = Math.max(...times)
+  const minValue = Math.min(...values)
+  const maxValue = Math.max(...values)
+  const timeSpan = Math.max(maxTime - minTime, 1)
+  const valueSpan = Math.max(maxValue - minValue, 0.01)
+  const xFor = (timestamp: string) => 44 + ((new Date(timestamp).getTime() - minTime) / timeSpan) * 912
+  const yFor = (value: number) => 278 - ((value - minValue) / valueSpan) * 222
+  const baselineY = yFor(0)
+
+  return (
+    <div>
+      <svg className="lineChart" viewBox="0 0 1000 320" role="img" aria-label="Strategy performance over time">
+        <line className="chartGridLine" x1="44" x2="956" y1="56" y2="56" />
+        <line className="chartGridLine" x1="44" x2="956" y1={baselineY} y2={baselineY} />
+        <line className="chartGridLine" x1="44" x2="956" y1="278" y2="278" />
+        <text className="chartAxisLabel" x="44" y="34">{formatCurrency(maxValue)}</text>
+        <text className="chartAxisLabel" x="44" y={Math.min(306, baselineY + 18)}>0</text>
+        <text className="chartAxisLabel" x="44" y="306">{formatCurrency(minValue)}</text>
+        {curves.map((curve) => {
+          const points = curve.points
+            .map((point) => `${xFor(point.timestamp).toFixed(2)},${yFor(point.value).toFixed(2)}`)
+            .join(' ')
+          return (
+            <polyline
+              className="chartLine"
+              fill="none"
+              key={curve.runId}
+              points={points}
+              stroke={curve.color}
+            />
+          )
+        })}
+      </svg>
+      <div className="chartLegend">
+        {curves.map((curve) => (
+          <div className="legendItem" key={curve.runId}>
+            <span className="legendSwatch" style={{ background: curve.color }} />
+            <span>{curve.label}</span>
+            <span className={curve.value >= 0 ? 'mono green' : 'mono red'}>{formatCurrency(curve.value)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default async function PerformancePage() {
   const [ordersResponse, positionsResponse, signalsResponse] = await Promise.all([
     supabase
@@ -77,6 +198,9 @@ export default async function PerformancePage() {
           fill_qty,
           fee,
           created_at
+        ),
+        signals (
+          signal_payload
         ),
         strategy_runs (
           id,
@@ -197,6 +321,7 @@ export default async function PerformancePage() {
     rows.length === 0
       ? null
       : rows.reduce((total, row) => total + Number(row.hitRate ?? 0), 0) / rows.length
+  const curves = buildCurves(buildFillEvents(orders))
 
   return (
     <>
@@ -226,6 +351,17 @@ export default async function PerformancePage() {
           <div className="cardLabel">Avg Hit Rate</div>
           <div className="cardValue">{formatPercent(avgHitRate)}</div>
         </div>
+      </section>
+
+      <section className="chartPanel performanceChartPanel">
+        <div className="pageHeader">
+          <div>
+            <h2 className="pageTitle">Strategy Performance Curve</h2>
+            <p className="pageKicker">Cumulative paper cashflow from fills, net of fees, by strategy run.</p>
+          </div>
+          <span className="badge badgeGray">{curves.length} runs</span>
+        </div>
+        <PerformanceChart curves={curves} />
       </section>
 
       <div className="tableWrap">
