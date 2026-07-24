@@ -15,10 +15,15 @@ if __package__ in {None, ""}:
 
 from services.models.shared.artifact_store import save_artifact
 from services.models.shared.model_registry import get_supabase_client, register_model
-from services.models.weather.estimator import WeatherEnsembleEstimator, fahrenheit_to_celsius
+from services.models.weather.estimator import (
+    CITY_COORDINATES,
+    WeatherEnsembleEstimator,
+    fahrenheit_to_celsius,
+)
 
 LOGGER = logging.getLogger(__name__)
 MODEL_NAME = "weather_bracket_model"
+MIN_REAL_TRAINING_ROWS = 10
 SYNTHETIC_WARNING = (
     "WARNING: training weather_bracket_model on SYNTHETIC placeholder data. "
     "This model is NOT suitable for real trading and must be retrained on "
@@ -96,75 +101,45 @@ def _label_from_title(title: str, actual_temp_f: float) -> tuple[int, float] | N
 
 def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
     """
-    Build training rows from weather_ensemble_snapshots and real outcomes.
+    Build training rows from weather_ensemble_snapshots and market outcomes.
 
-    A row is produced for each weather market whose city/date has an actual
-    outcome and whose city/date has ensemble snapshots. Threshold direction is
-    read from market_catalog.title because inspected -T tickers are ambiguous.
+    Features use forecasts issued strictly before the target date so the model
+    cannot see same-day actual weather when learning a resolved market label.
     """
     client = get_supabase_client()
     outcomes_response = (
-        client.table("actual_temperature_outcomes")
-        .select("city_code,outcome_date,high_temp_f,low_temp_f")
+        client.table("weather_market_outcomes")
+        .select(
+            "ticker,kind,city_code,target_date,strike_type,threshold_f,"
+            "lower_f,upper_f,yes_resolved"
+        )
         .execute()
     )
     outcomes = getattr(outcomes_response, "data", None) or []
     if not outcomes:
-        LOGGER.warning("No actual_temperature_outcomes rows available for real training.")
+        LOGGER.warning("No weather_market_outcomes rows available for real training.")
         return None
 
-    outcome_by_city_date: dict[tuple[str, date], dict[str, Any]] = {}
-    for row in outcomes:
-        key = (_canonical_city_code(row["city_code"]), _parse_date(row["outcome_date"]))
-        outcome_by_city_date[key] = row
-
-    markets_response = (
-        client.table("market_catalog")
-        .select("ticker,title")
-        .or_("ticker.ilike.KXHIGH%,ticker.ilike.KXLOW%")
-        .execute()
-    )
-    markets = getattr(markets_response, "data", None) or []
-    candidate_markets: list[tuple[dict[str, Any], str, str, int, float]] = []
-    parsed_weather_markets = 0
-    markets_with_outcomes = 0
-    for market in markets:
-        parsed = _parse_market_for_training(str(market["ticker"]))
+    candidate_markets: list[tuple[dict[str, Any], int, float]] = []
+    for outcome in outcomes:
+        parsed = _parse_market_for_training(str(outcome.get("ticker") or ""))
         if parsed is None:
             continue
-        parsed_weather_markets += 1
-        outcome = outcome_by_city_date.get(
-            (_canonical_city_code(parsed["city_code"]), parsed["target_date"])
-        )
-        if outcome is None:
+        city_code = _canonical_city_code(outcome.get("city_code", parsed["city_code"]))
+        coordinates = CITY_COORDINATES.get(city_code)
+        if coordinates is None:
             continue
-        markets_with_outcomes += 1
-        temp_key = "high_temp_f" if str(parsed["kind"]).upper() == "HIGH" else "low_temp_f"
-        actual_temp = outcome.get(temp_key)
-        if actual_temp is None:
+        target_date = _parse_date(outcome.get("target_date"))
+        if target_date != parsed["target_date"]:
             continue
-        label = _label_from_title(str(market.get("title") or ""), float(actual_temp))
-        if label is None:
-            continue
-        label_value, threshold_f = label
+        parsed["location_lat"], parsed["location_lon"] = coordinates
+        parsed["kind"] = str(outcome.get("kind", parsed["kind"])).upper()
         candidate_markets.append(
-            (
-                parsed,
-                str(market["ticker"]),
-                str(market.get("title") or ""),
-                label_value,
-                threshold_f,
-            )
+            (parsed, 1 if outcome.get("yes_resolved") else 0, float(outcome["threshold_f"]))
         )
 
     if not candidate_markets:
-        LOGGER.warning(
-            "No weather markets could be labeled from outcomes "
-            "(outcomes=%s, parsed_weather_markets=%s, markets_with_outcomes=%s).",
-            len(outcomes),
-            parsed_weather_markets,
-            markets_with_outcomes,
-        )
+        LOGGER.warning("No weather market outcomes could be parsed for real training.")
         return None
 
     snapshot_response = (
@@ -212,8 +187,9 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
     x_rows: list[list[float]] = []
     y_rows: list[int] = []
     candidate_forecast_matches = 0
-    for parsed, _ticker, _title, label_value, threshold_f in candidate_markets:
+    for parsed, label_value, threshold_f in candidate_markets:
         target_date = parsed["target_date"]
+        target_start = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
         threshold_c = fahrenheit_to_celsius(threshold_f)
         for (lat, lon, forecast_date, _issued_raw), member_values in by_forecast.items():
             if (
@@ -221,6 +197,11 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
                 or lon != round(float(parsed["location_lon"]), 3)
                 or forecast_date != target_date
             ):
+                continue
+            issued_at = min(
+                issued_at for _member, _high_value, _low_value, issued_at in member_values
+            )
+            if issued_at >= target_start:
                 continue
             candidate_forecast_matches += 1
             kind = str(parsed["kind"]).upper()
@@ -231,14 +212,8 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
             if len(daily_values) < 2:
                 continue
             stats = _compute_ensemble_features(daily_values)
-            issued_at = min(
-                issued_at for _member, _high_value, _low_value, issued_at in member_values
-            )
             hours_to_target = max(
-                (
-                    datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
-                    - issued_at
-                ).total_seconds()
+                (target_start - issued_at).total_seconds()
                 / 3600.0,
                 0.0,
             )
@@ -253,7 +228,7 @@ def _load_real_training_rows() -> tuple[np.ndarray, np.ndarray] | None:
             )
             y_rows.append(label_value)
 
-    if len(set(y_rows)) < 2 or len(y_rows) < 10:
+    if len(set(y_rows)) < 2 or len(y_rows) < MIN_REAL_TRAINING_ROWS:
         LOGGER.warning(
             "Real outcome training data is present but insufficient "
             "(candidate_markets=%s, forecast_matches=%s, rows=%s, classes=%s); "
