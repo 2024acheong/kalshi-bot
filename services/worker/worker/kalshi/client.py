@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import asyncio
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -9,6 +10,8 @@ import httpx
 
 
 logger = logging.getLogger(__name__)
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_FALLBACK_DELAY_SECONDS = 2.0
 
 
 class KalshiRestClient:
@@ -61,7 +64,7 @@ class KalshiRestClient:
         if series_ticker:
             params["series_ticker"] = series_ticker
 
-        response = await self._http_client.get(
+        response = await self._get_with_rate_limit_retry(
             f"{self._base_url}/markets",
             params=params,
         )
@@ -72,6 +75,31 @@ class KalshiRestClient:
             raise ValueError("Kalshi markets payload is not a list")
         next_cursor = payload.get("cursor") or payload.get("next_cursor")
         return markets, str(next_cursor) if next_cursor else None
+
+    async def _get_with_rate_limit_retry(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any],
+    ) -> httpx.Response:
+        response = await self._http_client.get(url, params=params)
+        for attempt in range(RATE_LIMIT_RETRIES):
+            if response.status_code != 429:
+                return response
+            retry_after = _retry_after_seconds(response)
+            delay = (
+                retry_after
+                if retry_after is not None
+                else RATE_LIMIT_FALLBACK_DELAY_SECONDS * (attempt + 1)
+            )
+            self._logger.warning(
+                "Kalshi rate limit for params=%s; retrying in %.1fs",
+                params,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            response = await self._http_client.get(url, params=params)
+        return response
 
     async def list_series(
         self,
@@ -232,4 +260,14 @@ def _decimal_value(value: Any) -> Decimal | None:
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
+        return None
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
         return None
