@@ -3,9 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-import pytest
-
-from core.risk.engine import OrderIntent
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
 from core.strategies.spread_capture import SpreadCaptureIntent, SpreadCaptureStrategy
 
@@ -18,7 +15,7 @@ def make_market(**kwargs) -> MarketState:
         "ticker": "KXTEST-26JAN-YES",
         "timestamp": BASE_TIME,
         "yes_bid": Decimal("0.45"),
-        "yes_ask": Decimal("0.55"),
+        "yes_ask": Decimal("0.40"),
         "yes_bid_size": 100,
         "yes_ask_size": 100,
         "last_price": Decimal("0.50"),
@@ -27,6 +24,10 @@ def make_market(**kwargs) -> MarketState:
         "close_time": BASE_TIME + timedelta(hours=24),
         "status": MarketStatus.OPEN,
         "source": "rest_poll",
+        "no_bid": Decimal("0.50"),
+        "no_ask": Decimal("0.45"),
+        "no_bid_size": 100,
+        "no_ask_size": 100,
     }
     defaults.update(kwargs)
     return MarketState(**defaults)
@@ -52,20 +53,15 @@ def make_features(**kwargs) -> FeatureVector:
     return FeatureVector(**defaults)
 
 
-def test_holds_on_narrow_spread() -> None:
+def test_evaluate_ignores_passive_spread_conditions_without_arbitrage() -> None:
     result = SpreadCaptureStrategy().evaluate(
-        make_market(),
-        make_features(spread_pct=1.0),
-        run_id="run-1",
-    )
-
-    assert result is None
-
-
-def test_holds_on_imbalanced_book() -> None:
-    result = SpreadCaptureStrategy().evaluate(
-        make_market(),
-        make_features(bid_ask_imbalance=0.5),
+        make_market(
+            yes_bid=Decimal("0.40"),
+            yes_ask=Decimal("0.60"),
+            no_bid=Decimal("0.39"),
+            no_ask=Decimal("0.42"),
+        ),
+        make_features(spread_pct=50.0, bid_ask_imbalance=0.0),
         run_id="run-1",
     )
 
@@ -82,9 +78,9 @@ def test_holds_on_insufficient_time() -> None:
     assert result is None
 
 
-def test_holds_on_degenerate_book() -> None:
+def test_holds_when_fees_erase_arbitrage() -> None:
     result = SpreadCaptureStrategy().evaluate(
-        make_market(yes_bid=Decimal("0")),
+        make_market(yes_ask=Decimal("0.48"), no_ask=Decimal("0.45")),
         make_features(),
         run_id="run-1",
     )
@@ -92,49 +88,29 @@ def test_holds_on_degenerate_book() -> None:
     assert result is None
 
 
-def test_enters_on_favorable_conditions() -> None:
+def test_enters_only_on_true_arbitrage() -> None:
     result = SpreadCaptureStrategy().evaluate(make_market(), make_features(), run_id="run-1")
 
     assert isinstance(result, SpreadCaptureIntent)
-    assert isinstance(result.yes_intent, OrderIntent)
-    assert isinstance(result.no_intent, OrderIntent)
     assert result.yes_intent.side == "yes"
     assert result.no_intent.side == "no"
     assert result.yes_intent.qty == 10
     assert result.no_intent.qty == 10
     assert result.yes_intent.run_id == "run-1"
     assert result.no_intent.run_id == "run-1"
-    assert result.max_resting_seconds == 30
+    assert result.max_resting_seconds == 0
     assert result.yes_intent.signal_id == result.pair_id
     assert result.no_intent.signal_id == result.pair_id
 
 
-def test_yes_intent_priced_at_bid() -> None:
-    market = make_market(yes_bid=Decimal("0.42"))
+def test_arbitrage_intents_cross_yes_and_no_asks() -> None:
+    market = make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45"))
 
     result = SpreadCaptureStrategy().evaluate(market, make_features(), run_id="run-1")
 
     assert result is not None
-    assert result.yes_intent.price == market.yes_bid
-
-
-def test_no_intent_priced_at_ask() -> None:
-    market = make_market(yes_ask=Decimal("0.58"))
-
-    result = SpreadCaptureStrategy().evaluate(market, make_features(), run_id="run-1")
-
-    assert result is not None
-    assert result.no_intent.price == market.yes_ask
-
-
-def test_estimated_edge_is_half_spread() -> None:
-    market = make_market(yes_bid=Decimal("0.40"), yes_ask=Decimal("0.52"))
-
-    result = SpreadCaptureStrategy().evaluate(market, make_features(), run_id="run-1")
-
-    assert result is not None
-    assert result.yes_intent.estimated_edge == pytest.approx(0.06)
-    assert result.no_intent.estimated_edge == pytest.approx(0.06)
+    assert result.yes_intent.price == market.yes_ask
+    assert result.no_intent.price == market.no_ask
 
 
 def test_pair_id_is_unique() -> None:

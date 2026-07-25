@@ -28,11 +28,15 @@ type FillWithOrder = FillRow & {
   orders?:
     | {
         run_id: string | null
+        side: string | null
+        signal_id: string | null
         signals?: SignalRelation | SignalRelation[] | null
         strategy_runs?: RunRelation | RunRelation[] | null
       }
     | {
         run_id: string | null
+        side: string | null
+        signal_id: string | null
         signals?: SignalRelation | SignalRelation[] | null
         strategy_runs?: RunRelation | RunRelation[] | null
       }[]
@@ -47,7 +51,10 @@ type SignalRelation = {
 
 type PositionRow = {
   run_id: string | null
+  ticker: string | null
+  side: string | null
   qty: number | null
+  avg_entry: number | string | null
   unrealized_pnl: number | string | null
 }
 
@@ -56,6 +63,13 @@ type SignalRow = {
   edge: number | string | null
   prob_estimate: number | string | null
   strategy_runs?: RunRelation | RunRelation[] | null
+}
+
+type MarketSnapshotRow = {
+  ticker: string | null
+  yes_bid: number | string | null
+  no_bid: number | string | null
+  timestamp: string | null
 }
 
 function firstRelation<T>(value: T | T[] | null | undefined) {
@@ -82,7 +96,21 @@ function signalPayload(fill: FillWithOrder) {
 }
 
 function buildFillEvents(fills: FillWithOrder[]) {
-  const events: PerformanceFillEvent[] = []
+  const nonArbEvents: PerformanceFillEvent[] = []
+  const arbPairs = new Map<
+    string,
+    {
+      runId: string
+      label: string
+      timestamp: string
+      yesQty: number
+      yesCost: number
+      yesFees: number
+      noQty: number
+      noCost: number
+      noFees: number
+    }
+  >()
   for (const fill of fills) {
     if (!fill.created_at) {
       continue
@@ -94,18 +122,76 @@ function buildFillEvents(fills: FillWithOrder[]) {
     const isClosing = Boolean(signalPayload(fill)?.is_closing_order)
     const notional = fillNotional(fill)
     const fee = Number(fill.fee ?? 0)
-    events.push({
+    const signalId = order?.signal_id
+    const side = order?.side
+    const qty = Number(fill.fill_qty ?? 0)
+    if (signalId && qty > 0 && (side === 'yes' || side === 'no') && label.startsWith('spread_capture')) {
+      const pairKey = `${runId}:${signalId}`
+      const pair =
+        arbPairs.get(pairKey) ??
+        {
+          runId,
+          label,
+          timestamp: fill.created_at,
+          yesQty: 0,
+          yesCost: 0,
+          yesFees: 0,
+          noQty: 0,
+          noCost: 0,
+          noFees: 0,
+        }
+      pair.timestamp =
+        new Date(fill.created_at).getTime() > new Date(pair.timestamp).getTime()
+          ? fill.created_at
+          : pair.timestamp
+      if (side === 'yes') {
+        pair.yesQty += qty
+        pair.yesCost += notional
+        pair.yesFees += fee
+      } else {
+        pair.noQty += qty
+        pair.noCost += notional
+        pair.noFees += fee
+      }
+      arbPairs.set(pairKey, pair)
+      continue
+    }
+    if (!isClosing) {
+      continue
+    }
+    nonArbEvents.push({
       runId,
       label,
       timestamp: fill.created_at,
-      signedValue: isClosing ? notional - fee : -notional - fee,
+      signedValue: notional - fee,
     })
   }
-  return events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+  const arbEvents = [...arbPairs.values()].flatMap((pair) => {
+    const matchedQty = Math.min(pair.yesQty, pair.noQty)
+    if (matchedQty <= 0) {
+      return []
+    }
+    const yesAvg = pair.yesCost / pair.yesQty
+    const noAvg = pair.noCost / pair.noQty
+    const feeShare =
+      (pair.yesFees * matchedQty) / pair.yesQty +
+      (pair.noFees * matchedQty) / pair.noQty
+    return [
+      {
+        runId: pair.runId,
+        label: pair.label,
+        timestamp: pair.timestamp,
+        signedValue: matchedQty * (1 - yesAvg - noAvg) - feeShare,
+      },
+    ]
+  })
+  return [...arbEvents, ...nonArbEvents].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  )
 }
 
 export default async function PerformancePage() {
-  const [fillsResponse, positionsResponse, signalsResponse] = await Promise.all([
+  const [fillsResponse, positionsResponse, signalsResponse, snapshotsResponse] = await Promise.all([
     fetchAllRows<FillWithOrder>(
       (from, to) => supabase
         .from('fills')
@@ -117,6 +203,8 @@ export default async function PerformancePage() {
           created_at,
           orders (
             run_id,
+            side,
+            signal_id,
             signals (
               signal_payload
             ),
@@ -136,7 +224,11 @@ export default async function PerformancePage() {
       3000,
     ),
     fetchAllRows<PositionRow>((from, to) =>
-      supabase.from('positions').select('run_id,qty,unrealized_pnl').range(from, to),
+      supabase
+        .from('positions')
+        .select('run_id,ticker,side,qty,avg_entry,unrealized_pnl')
+        .neq('qty', 0)
+        .range(from, to),
     ),
     fetchAllRows<SignalRow>(
       (from, to) => supabase
@@ -159,9 +251,19 @@ export default async function PerformancePage() {
       500,
       3000,
     ),
+    fetchAllRows<MarketSnapshotRow>(
+      (from, to) => supabase
+        .from('market_snapshots')
+        .select('ticker,yes_bid,no_bid,timestamp')
+        .order('timestamp', { ascending: false })
+        .range(from, to),
+      1000,
+      5000,
+    ),
   ])
 
-  const firstError = fillsResponse.error ?? positionsResponse.error ?? signalsResponse.error
+  const firstError =
+    fillsResponse.error ?? positionsResponse.error ?? signalsResponse.error ?? snapshotsResponse.error
   if (firstError) {
     return <div className="card red">Error loading performance: {firstError.message}</div>
   }
@@ -169,6 +271,13 @@ export default async function PerformancePage() {
   const fills = fillsResponse.data
   const positions = positionsResponse.data
   const signals = signalsResponse.data
+  const snapshots = snapshotsResponse.data
+  const latestSnapshotByTicker = new Map<string, MarketSnapshotRow>()
+  for (const snapshot of snapshots) {
+    if (snapshot.ticker && !latestSnapshotByTicker.has(snapshot.ticker)) {
+      latestSnapshotByTicker.set(snapshot.ticker, snapshot)
+    }
+  }
   const byRun = new Map<
     string,
     {
@@ -176,12 +285,27 @@ export default async function PerformancePage() {
       mode: string
       fills: number
       fees: number
+      lockedArbFees: number
+      lockedArbPnl: number
       notional: number
       latest: string | null
-      unrealizedPnl: number
+      openMarkPnl: number
       signals: number
       edgeTotal: number
       probabilityTotal: number
+    }
+  >()
+  const arbPairs = new Map<
+    string,
+    {
+      runId: string
+      label: string
+      yesQty: number
+      yesCost: number
+      yesFees: number
+      noQty: number
+      noCost: number
+      noFees: number
     }
   >()
 
@@ -196,9 +320,11 @@ export default async function PerformancePage() {
         mode: run?.mode ?? 'paper',
         fills: 0,
         fees: 0,
+        lockedArbFees: 0,
+        lockedArbPnl: 0,
         notional: 0,
         latest: null,
-        unrealizedPnl: 0,
+        openMarkPnl: 0,
         signals: 0,
         edgeTotal: 0,
         probabilityTotal: 0,
@@ -210,6 +336,53 @@ export default async function PerformancePage() {
       row.latest = fill.created_at
     }
     byRun.set(runId, row)
+
+    const signalId = order?.signal_id
+    const side = order?.side
+    const qty = Number(fill.fill_qty ?? 0)
+    if (signalId && qty > 0 && (side === 'yes' || side === 'no') && row.label.startsWith('spread_capture')) {
+      const pairKey = `${runId}:${signalId}`
+      const pair =
+        arbPairs.get(pairKey) ??
+        {
+          runId,
+          label: row.label,
+          yesQty: 0,
+          yesCost: 0,
+          yesFees: 0,
+          noQty: 0,
+          noCost: 0,
+          noFees: 0,
+        }
+      if (side === 'yes') {
+        pair.yesQty += qty
+        pair.yesCost += fillNotional(fill)
+        pair.yesFees += Number(fill.fee ?? 0)
+      } else {
+        pair.noQty += qty
+        pair.noCost += fillNotional(fill)
+        pair.noFees += Number(fill.fee ?? 0)
+      }
+      arbPairs.set(pairKey, pair)
+    }
+  }
+
+  for (const pair of arbPairs.values()) {
+    const matchedQty = Math.min(pair.yesQty, pair.noQty)
+    if (matchedQty <= 0) {
+      continue
+    }
+    const yesAvg = pair.yesCost / pair.yesQty
+    const noAvg = pair.noCost / pair.noQty
+    const feeShare =
+      (pair.yesFees * matchedQty) / pair.yesQty +
+      (pair.noFees * matchedQty) / pair.noQty
+    const lockedPnl = matchedQty * (1 - yesAvg - noAvg) - feeShare
+    const row = byRun.get(pair.runId)
+    if (row) {
+      row.lockedArbPnl += lockedPnl
+      row.lockedArbFees += feeShare
+    }
   }
 
   for (const position of positions) {
@@ -218,7 +391,20 @@ export default async function PerformancePage() {
     }
     const row = byRun.get(position.run_id)
     if (row) {
-      row.unrealizedPnl += Number(position.unrealized_pnl ?? 0)
+      const latestSnapshot = position.ticker ? latestSnapshotByTicker.get(position.ticker) : null
+      const side = position.side
+      const mark =
+        side === 'yes'
+          ? Number(latestSnapshot?.yes_bid ?? NaN)
+          : side === 'no'
+            ? Number(latestSnapshot?.no_bid ?? NaN)
+            : NaN
+      const qty = Number(position.qty ?? 0)
+      const avgEntry = Number(position.avg_entry ?? NaN)
+      row.openMarkPnl +=
+        Number.isFinite(mark) && Number.isFinite(avgEntry)
+          ? (mark - avgEntry) * qty
+          : Number(position.unrealized_pnl ?? 0)
     }
   }
 
@@ -234,9 +420,11 @@ export default async function PerformancePage() {
         mode: run?.mode ?? 'paper',
         fills: 0,
         fees: 0,
+        lockedArbFees: 0,
+        lockedArbPnl: 0,
         notional: 0,
         latest: null,
-        unrealizedPnl: 0,
+        openMarkPnl: 0,
         signals: 0,
         edgeTotal: 0,
         probabilityTotal: 0,
@@ -249,11 +437,13 @@ export default async function PerformancePage() {
 
   const rows = [...byRun.entries()]
     .map(([runId, row]) => {
-      const paperPnl = row.unrealizedPnl - row.fees
+      const nonArbFees = row.fees - row.lockedArbFees
+      const paperPnl = row.openMarkPnl + row.lockedArbPnl - nonArbFees
       return {
         runId,
         ...row,
         paperPnl,
+        nonArbFees,
         fillRate: row.signals === 0 ? null : row.fills / row.signals,
         avgEdge: row.signals === 0 ? null : row.edgeTotal / row.signals,
         avgProbability: row.signals === 0 ? null : row.probabilityTotal / row.signals,
@@ -305,7 +495,7 @@ export default async function PerformancePage() {
         <div className="pageHeader">
           <div>
             <h2 className="pageTitle">Strategy Performance Curve</h2>
-            <p className="pageKicker">Cumulative paper cashflow from fills, net of fees, by strategy run.</p>
+            <p className="pageKicker">Cumulative locked arbitrage and realized paper value by strategy run.</p>
           </div>
           <span className="badge badgeGray">{rows.length} runs</span>
         </div>
@@ -319,6 +509,8 @@ export default async function PerformancePage() {
               <th>Strategy Run</th>
               <th>Mode</th>
               <th>Paper PnL</th>
+              <th>Locked Arb</th>
+              <th>Open Mark</th>
               <th>Fees</th>
               <th>Fills</th>
               <th>Fill Rate</th>
@@ -336,6 +528,8 @@ export default async function PerformancePage() {
                 <td className={row.paperPnl >= 0 ? 'green mono' : 'red mono'}>
                   {formatCurrency(row.paperPnl)}
                 </td>
+                <td>{formatCurrency(row.lockedArbPnl)}</td>
+                <td>{formatCurrency(row.openMarkPnl)}</td>
                 <td>{formatCurrency(row.fees)}</td>
                 <td>{row.fills}</td>
                 <td>{formatPercent(row.fillRate)}</td>

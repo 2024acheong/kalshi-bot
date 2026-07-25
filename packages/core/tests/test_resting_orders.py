@@ -26,6 +26,10 @@ def make_market(**kwargs) -> MarketState:
         "close_time": BASE_TIME + timedelta(hours=24),
         "status": MarketStatus.OPEN,
         "source": "rest_poll",
+        "no_bid": Decimal("0.50"),
+        "no_ask": Decimal("0.55"),
+        "no_bid_size": 100,
+        "no_ask_size": 100,
     }
     defaults.update(kwargs)
     return MarketState(**defaults)
@@ -196,14 +200,14 @@ def test_check_limit_crossed_yes_side() -> None:
 
 def test_check_limit_crossed_no_side() -> None:
     assert check_limit_crossed(
-        make_intent(side="no", price=Decimal("0.45")),
-        make_market(yes_bid=Decimal("0.46")),
+        make_intent(side="no", price=Decimal("0.55")),
+        make_market(no_ask=Decimal("0.54")),
     )
     assert not check_limit_crossed(
-        make_intent(side="no", price=Decimal("0.45")),
-        make_market(yes_bid=Decimal("0.45")),
+        make_intent(side="no", price=Decimal("0.55")),
+        make_market(no_ask=Decimal("0.55")),
     )
     assert not check_limit_crossed(
-        make_intent(side="no", price=Decimal("0.45")),
-        make_market(yes_bid=Decimal("0.44")),
+        make_intent(side="no", price=Decimal("0.55")),
+        make_market(no_ask=Decimal("0.56")),
     )
