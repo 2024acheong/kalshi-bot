@@ -503,13 +503,53 @@ select {
   margin-bottom: 1rem;
 }
 
+.performanceChart {
+  display: grid;
+  gap: 1rem;
+}
+
+.rangeSelector {
+  align-items: center;
+  background: rgba(7, 10, 18, 0.34);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  display: inline-flex;
+  gap: 0.25rem;
+  justify-self: flex-end;
+  padding: 0.25rem;
+}
+
+.rangeButton {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: "Space Mono", monospace;
+  font-size: 0.76rem;
+  font-weight: 700;
+  min-width: 44px;
+  padding: 0.42rem 0.58rem;
+}
+
+.rangeButton:hover,
+.rangeButton.active {
+  background: rgba(34, 211, 238, 0.1);
+  border-color: rgba(34, 211, 238, 0.26);
+  color: var(--text);
+}
+
 .lineChart {
-  background: linear-gradient(180deg, rgba(23, 32, 51, 0.36), rgba(7, 10, 18, 0.18));
+  background: linear-gradient(180deg, rgba(10, 15, 25, 0.98), rgba(7, 10, 18, 0.78));
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   display: block;
-  height: 320px;
+  height: 340px;
   width: 100%;
+}
+
+.chartPlotFill {
+  fill: url("#chartFade");
 }
 
 .chartGridLine {
@@ -517,17 +557,33 @@ select {
   stroke-width: 1;
 }
 
+.chartBaseline {
+  stroke: rgba(237, 245, 255, 0.28);
+}
+
+.chartTick {
+  stroke: rgba(148, 163, 184, 0.24);
+  stroke-width: 1;
+}
+
 .chartAxisLabel {
   fill: var(--muted);
   font-family: "Space Mono", monospace;
-  font-size: 20px;
+  font-size: 16px;
+}
+
+.chartTimeLabel {
+  fill: var(--muted);
+  font-family: "Space Mono", monospace;
+  font-size: 14px;
+  text-anchor: middle;
 }
 
 .chartLine {
-  filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.14));
+  filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.18));
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 3.5;
+  stroke-width: 3;
 }
 
 .chartLegend {

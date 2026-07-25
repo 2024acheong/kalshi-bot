@@ -1,5 +1,6 @@
 import { formatAge, formatCurrency, formatDateTime, formatNumber } from '@/components/Format'
 import { StatusBadge } from '@/components/StatusBadge'
+import { fetchAllRows } from '@/lib/fetchAllRows'
 import { supabase } from '@/lib/supabase'
 
 export const dynamic = 'force-dynamic'
@@ -25,7 +26,16 @@ type OrderRow = {
   id: string
   run_id: string | null
   ticker: string | null
+  risk_decision: string | null
   status: string | null
+  created_at: string | null
+  fills?: FillRow[] | null
+}
+
+type FillRow = {
+  fill_price: number | string | null
+  fill_qty: number | null
+  fee: number | string | null
   created_at: string | null
 }
 
@@ -61,29 +71,54 @@ function paramsMode(params: Record<string, unknown> | null) {
 export default async function StrategiesPage() {
   const [configsResponse, runsResponse, ordersResponse, signalsResponse, positionsResponse] =
     await Promise.all([
-      supabase
-        .from('strategy_configs')
-        .select('id,name,version,params_json,status,updated_at')
-        .order('name', { ascending: true }),
-      supabase
-        .from('strategy_runs')
-        .select('id,config_id,mode,started_at,ended_at')
-        .order('started_at', { ascending: false })
-        .limit(200),
-      supabase
-        .from('orders')
-        .select('id,run_id,ticker,status,created_at')
-        .order('created_at', { ascending: false })
-        .limit(500),
-      supabase
-        .from('signals')
-        .select('run_id,ticker,created_at,edge')
-        .order('created_at', { ascending: false })
-        .limit(500),
-      supabase
-        .from('positions')
-        .select('run_id,qty,unrealized_pnl')
-        .neq('qty', 0),
+      fetchAllRows<StrategyConfigRow>((from, to) =>
+        supabase
+          .from('strategy_configs')
+          .select('id,name,version,params_json,status,updated_at')
+          .order('name', { ascending: true })
+          .range(from, to),
+      ),
+      fetchAllRows<RunRow>((from, to) =>
+        supabase
+          .from('strategy_runs')
+          .select('id,config_id,mode,started_at,ended_at')
+          .order('started_at', { ascending: false })
+          .range(from, to),
+      ),
+      fetchAllRows<OrderRow>((from, to) =>
+        supabase
+          .from('orders')
+          .select(`
+            id,
+            run_id,
+            ticker,
+            risk_decision,
+            status,
+            created_at,
+            fills (
+              fill_price,
+              fill_qty,
+              fee,
+              created_at
+            )
+          `)
+          .order('created_at', { ascending: false })
+          .range(from, to),
+      ),
+      fetchAllRows<SignalRow>((from, to) =>
+        supabase
+          .from('signals')
+          .select('run_id,ticker,created_at,edge')
+          .order('created_at', { ascending: false })
+          .range(from, to),
+      ),
+      fetchAllRows<PositionRow>((from, to) =>
+        supabase
+          .from('positions')
+          .select('run_id,qty,unrealized_pnl')
+          .neq('qty', 0)
+          .range(from, to),
+      ),
     ])
 
   const firstError =
@@ -96,11 +131,11 @@ export default async function StrategiesPage() {
     return <div className="card red">Error loading strategies: {firstError.message}</div>
   }
 
-  const configs = (configsResponse.data ?? []) as StrategyConfigRow[]
-  const runs = (runsResponse.data ?? []) as RunRow[]
-  const orders = (ordersResponse.data ?? []) as OrderRow[]
-  const signals = (signalsResponse.data ?? []) as SignalRow[]
-  const positions = (positionsResponse.data ?? []) as PositionRow[]
+  const configs = configsResponse.data
+  const runs = runsResponse.data
+  const orders = ordersResponse.data
+  const signals = signalsResponse.data
+  const positions = positionsResponse.data
   const runById = new Map(runs.map((run) => [run.id, run]))
 
   const rows = configs.map((config) => {
@@ -130,17 +165,23 @@ export default async function StrategiesPage() {
       (total, position) => total + Number(position.unrealized_pnl ?? 0),
       0,
     )
+    const fills = configOrders.flatMap((order) => order.fills ?? [])
+    const fees = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
+    const paperPnl = openPnl - fees
     return {
       config,
       latestRun,
       runs: configRuns.length,
       orders: configOrders.length,
+      fills: fills.length,
       signals: configSignals.length,
       tickers: tickers.size,
       latestActivity,
       avgEdge,
       openPositions: configPositions.length,
       openPnl,
+      fees,
+      paperPnl,
     }
   })
 
@@ -151,6 +192,8 @@ export default async function StrategiesPage() {
     (total, position) => total + Number(position.unrealized_pnl ?? 0),
     0,
   )
+  const totalFees = rows.reduce((total, row) => total + row.fees, 0)
+  const paperPnl = openPnl - totalFees
 
   return (
     <>
@@ -177,8 +220,11 @@ export default async function StrategiesPage() {
           <div className="cardValue">{positions.length}</div>
         </div>
         <div className="card">
-          <div className="cardLabel">Open PnL</div>
-          <div className="cardValue">{formatCurrency(openPnl)}</div>
+          <div className="cardLabel">Paper PnL</div>
+          <div className={paperPnl >= 0 ? 'cardValue green' : 'cardValue red'}>
+            {formatCurrency(paperPnl)}
+          </div>
+          <div className="cardMeta">{formatCurrency(openPnl)} open PnL</div>
         </div>
       </section>
 
@@ -213,8 +259,18 @@ export default async function StrategiesPage() {
               <span className="mono">{row.orders}</span>
             </div>
             <div className="metricLine">
+              <span className="muted">Fills</span>
+              <span className="mono">{row.fills}</span>
+            </div>
+            <div className="metricLine">
               <span className="muted">Avg Edge</span>
               <span className="mono blue">{formatNumber(row.avgEdge)}</span>
+            </div>
+            <div className="metricLine">
+              <span className="muted">Paper PnL</span>
+              <span className={row.paperPnl >= 0 ? 'mono green' : 'mono red'}>
+                {formatCurrency(row.paperPnl)}
+              </span>
             </div>
             <div className="metricLine">
               <span className="muted">Open PnL</span>

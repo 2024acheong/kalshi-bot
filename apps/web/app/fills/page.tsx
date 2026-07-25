@@ -1,5 +1,6 @@
 import { FillsFilter, type FillTableRow } from '@/components/FillsFilter'
 import { formatCurrency } from '@/components/Format'
+import { fetchAllRows } from '@/lib/fetchAllRows'
 import { supabase } from '@/lib/supabase'
 
 export const dynamic = 'force-dynamic'
@@ -50,36 +51,39 @@ function firstRelation<T>(value: T | T[] | null | undefined) {
 }
 
 export default async function FillsPage() {
-  const { data, error } = await supabase
-    .from('fills')
-    .select(`
-      id,
-      fill_price,
-      fill_qty,
-      fee,
-      fill_type,
-      created_at,
-      orders (
-        ticker,
-        side,
-        run_id,
-        strategy_runs (
-          id,
-          mode,
-          strategy_configs (
-            name,
-            version
+  const { data, error } = await fetchAllRows<FillWithOrder>((from, to) =>
+    supabase
+      .from('fills')
+      .select(`
+        id,
+        fill_price,
+        fill_qty,
+        fee,
+        fill_type,
+        created_at,
+        orders (
+          ticker,
+          side,
+          run_id,
+          strategy_runs (
+            id,
+            mode,
+            strategy_configs (
+              name,
+              version
+            )
           )
         )
-      )
-    `)
-    .order('created_at', { ascending: false })
+      `)
+      .order('created_at', { ascending: false })
+      .range(from, to),
+  )
 
   if (error) {
     return <div className="card red">Error loading fills: {error.message}</div>
   }
 
-  const fills = (data ?? []) as unknown as FillWithOrder[]
+  const fills = data
   const grossNotional = fills.reduce(
     (total, fill) => total + Number(fill.fill_qty ?? 0) * Number(fill.fill_price ?? 0),
     0,
