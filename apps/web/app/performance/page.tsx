@@ -23,23 +23,26 @@ type FillRow = {
   created_at: string | null
 }
 
+type FillWithOrder = FillRow & {
+  id: string
+  orders?:
+    | {
+        run_id: string | null
+        signals?: SignalRelation | SignalRelation[] | null
+        strategy_runs?: RunRelation | RunRelation[] | null
+      }
+    | {
+        run_id: string | null
+        signals?: SignalRelation | SignalRelation[] | null
+        strategy_runs?: RunRelation | RunRelation[] | null
+      }[]
+    | null
+}
+
 type SignalRelation = {
   signal_payload?: {
     is_closing_order?: boolean
   } | null
-}
-
-type OrderRow = {
-  id: string
-  run_id: string | null
-  status: string | null
-  risk_decision: string | null
-  price: number | string | null
-  qty: number | null
-  created_at: string | null
-  fills?: FillRow[] | null
-  signals?: SignalRelation | SignalRelation[] | null
-  strategy_runs?: RunRelation | RunRelation[] | null
 }
 
 type PositionRow = {
@@ -52,6 +55,7 @@ type SignalRow = {
   run_id: string | null
   edge: number | string | null
   prob_estimate: number | string | null
+  strategy_runs?: RunRelation | RunRelation[] | null
 }
 
 function firstRelation<T>(value: T | T[] | null | undefined) {
@@ -69,56 +73,78 @@ function fillNotional(fill: FillRow) {
   return Number(fill.fill_price ?? 0) * Number(fill.fill_qty ?? 0)
 }
 
-function signalPayload(order: OrderRow) {
-  return firstRelation(order.signals)?.signal_payload ?? null
+function parentOrder(fill: FillWithOrder) {
+  return Array.isArray(fill.orders) ? fill.orders[0] ?? null : fill.orders ?? null
 }
 
-function buildFillEvents(orders: OrderRow[]) {
+function signalPayload(fill: FillWithOrder) {
+  return firstRelation(parentOrder(fill)?.signals)?.signal_payload ?? null
+}
+
+function buildFillEvents(fills: FillWithOrder[]) {
   const events: PerformanceFillEvent[] = []
-  for (const order of orders) {
-    const run = firstRelation(order.strategy_runs)
-    const runId = order.run_id ?? run?.id ?? 'unknown'
-    const label = runLabel(run, order.run_id)
-    const isClosing = Boolean(signalPayload(order)?.is_closing_order)
-    for (const fill of order.fills ?? []) {
-      if (!fill.created_at) {
-        continue
-      }
-      const notional = fillNotional(fill)
-      const fee = Number(fill.fee ?? 0)
-      events.push({
-        runId,
-        label,
-        timestamp: fill.created_at,
-        signedValue: isClosing ? notional - fee : -notional - fee,
-      })
+  for (const fill of fills) {
+    if (!fill.created_at) {
+      continue
     }
+    const order = parentOrder(fill)
+    const run = firstRelation(order?.strategy_runs)
+    const runId = order?.run_id ?? run?.id ?? 'unknown'
+    const label = runLabel(run, runId)
+    const isClosing = Boolean(signalPayload(fill)?.is_closing_order)
+    const notional = fillNotional(fill)
+    const fee = Number(fill.fee ?? 0)
+    events.push({
+      runId,
+      label,
+      timestamp: fill.created_at,
+      signedValue: isClosing ? notional - fee : -notional - fee,
+    })
   }
   return events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
 }
 
 export default async function PerformancePage() {
-  const [ordersResponse, positionsResponse, signalsResponse] = await Promise.all([
-    fetchAllRows<OrderRow>((from, to) =>
-      supabase
-        .from('orders')
+  const [fillsResponse, positionsResponse, signalsResponse] = await Promise.all([
+    fetchAllRows<FillWithOrder>(
+      (from, to) => supabase
+        .from('fills')
         .select(`
           id,
-          run_id,
-          status,
-          risk_decision,
-          price,
-          qty,
+          fill_price,
+          fill_qty,
+          fee,
           created_at,
-          fills (
-            fill_price,
-            fill_qty,
-            fee,
-            created_at
-          ),
-          signals (
-            signal_payload
-          ),
+          orders (
+            run_id,
+            signals (
+              signal_payload
+            ),
+            strategy_runs (
+              id,
+              mode,
+              strategy_configs (
+                name,
+                version
+              )
+            )
+          )
+        `)
+        .order('created_at', { ascending: false })
+        .range(from, to),
+      500,
+      3000,
+    ),
+    fetchAllRows<PositionRow>((from, to) =>
+      supabase.from('positions').select('run_id,qty,unrealized_pnl').range(from, to),
+    ),
+    fetchAllRows<SignalRow>(
+      (from, to) => supabase
+        .from('signals')
+        .select(`
+          run_id,
+          edge,
+          prob_estimate,
           strategy_runs (
             id,
             mode,
@@ -130,21 +156,17 @@ export default async function PerformancePage() {
         `)
         .order('created_at', { ascending: false })
         .range(from, to),
-    ),
-    fetchAllRows<PositionRow>((from, to) =>
-      supabase.from('positions').select('run_id,qty,unrealized_pnl').range(from, to),
-    ),
-    fetchAllRows<SignalRow>((from, to) =>
-      supabase.from('signals').select('run_id,edge,prob_estimate').range(from, to),
+      500,
+      3000,
     ),
   ])
 
-  const firstError = ordersResponse.error ?? positionsResponse.error ?? signalsResponse.error
+  const firstError = fillsResponse.error ?? positionsResponse.error ?? signalsResponse.error
   if (firstError) {
     return <div className="card red">Error loading performance: {firstError.message}</div>
   }
 
-  const orders = ordersResponse.data
+  const fills = fillsResponse.data
   const positions = positionsResponse.data
   const signals = signalsResponse.data
   const byRun = new Map<
@@ -152,8 +174,6 @@ export default async function PerformancePage() {
     {
       label: string
       mode: string
-      orders: number
-      allowed: number
       fills: number
       fees: number
       notional: number
@@ -165,16 +185,15 @@ export default async function PerformancePage() {
     }
   >()
 
-  for (const order of orders) {
-    const run = firstRelation(order.strategy_runs)
-    const runId = order.run_id ?? run?.id ?? 'unknown'
+  for (const fill of fills) {
+    const order = parentOrder(fill)
+    const run = firstRelation(order?.strategy_runs)
+    const runId = order?.run_id ?? run?.id ?? 'unknown'
     const row =
       byRun.get(runId) ??
       {
-        label: runLabel(run, order.run_id),
+        label: runLabel(run, order?.run_id ?? runId),
         mode: run?.mode ?? 'paper',
-        orders: 0,
-        allowed: 0,
         fills: 0,
         fees: 0,
         notional: 0,
@@ -184,17 +203,11 @@ export default async function PerformancePage() {
         edgeTotal: 0,
         probabilityTotal: 0,
       }
-    row.orders += 1
-    if (order.risk_decision === 'allow') {
-      row.allowed += 1
-    }
-    for (const fill of order.fills ?? []) {
-      row.fills += 1
-      row.fees += Number(fill.fee ?? 0)
-      row.notional += fillNotional(fill)
-    }
-    if (!row.latest || (order.created_at && order.created_at > row.latest)) {
-      row.latest = order.created_at
+    row.fills += 1
+    row.fees += Number(fill.fee ?? 0)
+    row.notional += fillNotional(fill)
+    if (!row.latest || (fill.created_at && fill.created_at > row.latest)) {
+      row.latest = fill.created_at
     }
     byRun.set(runId, row)
   }
@@ -213,12 +226,25 @@ export default async function PerformancePage() {
     if (!signal.run_id) {
       continue
     }
-    const row = byRun.get(signal.run_id)
-    if (row) {
-      row.signals += 1
-      row.edgeTotal += Number(signal.edge ?? 0)
-      row.probabilityTotal += Number(signal.prob_estimate ?? 0)
-    }
+    const run = firstRelation(signal.strategy_runs)
+    const row =
+      byRun.get(signal.run_id) ??
+      {
+        label: runLabel(run, signal.run_id),
+        mode: run?.mode ?? 'paper',
+        fills: 0,
+        fees: 0,
+        notional: 0,
+        latest: null,
+        unrealizedPnl: 0,
+        signals: 0,
+        edgeTotal: 0,
+        probabilityTotal: 0,
+      }
+    row.signals += 1
+    row.edgeTotal += Number(signal.edge ?? 0)
+    row.probabilityTotal += Number(signal.prob_estimate ?? 0)
+    byRun.set(signal.run_id, row)
   }
 
   const rows = [...byRun.entries()]
@@ -228,7 +254,7 @@ export default async function PerformancePage() {
         runId,
         ...row,
         paperPnl,
-        hitRate: row.allowed === 0 ? null : row.fills / row.allowed,
+        fillRate: row.signals === 0 ? null : row.fills / row.signals,
         avgEdge: row.signals === 0 ? null : row.edgeTotal / row.signals,
         avgProbability: row.signals === 0 ? null : row.probabilityTotal / row.signals,
         drawdown: Math.min(0, paperPnl),
@@ -239,18 +265,18 @@ export default async function PerformancePage() {
   const totalPaperPnl = rows.reduce((total, row) => total + row.paperPnl, 0)
   const totalFees = rows.reduce((total, row) => total + row.fees, 0)
   const totalFills = rows.reduce((total, row) => total + row.fills, 0)
-  const avgHitRate =
+  const avgFillRate =
     rows.length === 0
       ? null
-      : rows.reduce((total, row) => total + Number(row.hitRate ?? 0), 0) / rows.length
-  const fillEvents = buildFillEvents(orders)
+      : rows.reduce((total, row) => total + Number(row.fillRate ?? 0), 0) / rows.length
+  const fillEvents = buildFillEvents(fills)
 
   return (
     <>
       <section className="pageHeader">
         <div>
           <h1 className="pageTitle">Performance</h1>
-          <p className="pageKicker">Paper PnL, fills, fees, hit rate, drawdown, and edge by strategy run.</p>
+          <p className="pageKicker">Paper PnL, fills, fees, fill rate, drawdown, and edge by strategy run.</p>
         </div>
       </section>
 
@@ -270,8 +296,8 @@ export default async function PerformancePage() {
           <div className="cardValue">{formatCurrency(totalFees)}</div>
         </div>
         <div className="card">
-          <div className="cardLabel">Avg Hit Rate</div>
-          <div className="cardValue">{formatPercent(avgHitRate)}</div>
+          <div className="cardLabel">Avg Fill Rate</div>
+          <div className="cardValue">{formatPercent(avgFillRate)}</div>
         </div>
       </section>
 
@@ -295,7 +321,7 @@ export default async function PerformancePage() {
               <th>Paper PnL</th>
               <th>Fees</th>
               <th>Fills</th>
-              <th>Hit Rate</th>
+              <th>Fill Rate</th>
               <th>Avg Edge</th>
               <th>Avg Prob</th>
               <th>Drawdown</th>
@@ -312,7 +338,7 @@ export default async function PerformancePage() {
                 </td>
                 <td>{formatCurrency(row.fees)}</td>
                 <td>{row.fills}</td>
-                <td>{formatPercent(row.hitRate)}</td>
+                <td>{formatPercent(row.fillRate)}</td>
                 <td>{formatNumber(row.avgEdge)}</td>
                 <td>{formatPercent(row.avgProbability)}</td>
                 <td className="red">{formatCurrency(row.drawdown)}</td>
