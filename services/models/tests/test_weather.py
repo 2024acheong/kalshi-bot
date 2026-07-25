@@ -69,6 +69,7 @@ def make_features() -> FeatureVector:
 
 def test_artifact_store_roundtrip(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("services.models.shared.artifact_store.ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ARTIFACT_STORAGE", "local")
     model = {"kind": "stand-in", "weights": [1, 2, 3]}
 
     path = save_artifact(model, "test_model", "v1")
