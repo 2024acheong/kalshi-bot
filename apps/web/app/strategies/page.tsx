@@ -167,7 +167,6 @@ export default async function StrategiesPage() {
     )
     const fills = configOrders.flatMap((order) => order.fills ?? [])
     const fees = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
-    const paperPnl = openPnl - fees
     return {
       config,
       latestRun,
@@ -181,7 +180,6 @@ export default async function StrategiesPage() {
       openPositions: configPositions.length,
       openPnl,
       fees,
-      paperPnl,
     }
   })
 
@@ -193,7 +191,6 @@ export default async function StrategiesPage() {
     0,
   )
   const totalFees = rows.reduce((total, row) => total + row.fees, 0)
-  const paperPnl = openPnl - totalFees
 
   return (
     <>
@@ -220,11 +217,11 @@ export default async function StrategiesPage() {
           <div className="cardValue">{positions.length}</div>
         </div>
         <div className="card">
-          <div className="cardLabel">Paper PnL</div>
-          <div className={paperPnl >= 0 ? 'cardValue green' : 'cardValue red'}>
-            {formatCurrency(paperPnl)}
+          <div className="cardLabel">Open PnL</div>
+          <div className={openPnl >= 0 ? 'cardValue green' : 'cardValue red'}>
+            {formatCurrency(openPnl)}
           </div>
-          <div className="cardMeta">{formatCurrency(openPnl)} open PnL</div>
+          <div className="cardMeta">{formatCurrency(totalFees)} fees paid</div>
         </div>
       </section>
 
@@ -267,16 +264,14 @@ export default async function StrategiesPage() {
               <span className="mono blue">{formatNumber(row.avgEdge)}</span>
             </div>
             <div className="metricLine">
-              <span className="muted">Paper PnL</span>
-              <span className={row.paperPnl >= 0 ? 'mono green' : 'mono red'}>
-                {formatCurrency(row.paperPnl)}
-              </span>
-            </div>
-            <div className="metricLine">
               <span className="muted">Open PnL</span>
               <span className={row.openPnl >= 0 ? 'mono green' : 'mono red'}>
                 {formatCurrency(row.openPnl)}
               </span>
+            </div>
+            <div className="metricLine">
+              <span className="muted">Fees</span>
+              <span className="mono">{formatCurrency(row.fees)}</span>
             </div>
             <div className="metricLine">
               <span className="muted">Latest Activity</span>

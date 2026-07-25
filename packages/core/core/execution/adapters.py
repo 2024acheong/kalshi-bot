@@ -35,7 +35,7 @@ def check_limit_traded_through(intent: OrderIntent, market: MarketState) -> bool
         return market.yes_ask is not None and market.yes_ask < intent.price
 
     if intent.side == "no":
-        return market.yes_bid is not None and market.yes_bid > intent.price
+        return market.no_ask is not None and market.no_ask < intent.price
 
     return False
 
@@ -123,7 +123,7 @@ class PaperAdapter(BaseExecutionAdapter):
             return market.yes_ask
 
         if intent.side == "no":
-            return market.yes_bid
+            return market.no_ask
 
         return None
 
@@ -134,14 +134,14 @@ class PaperAdapter(BaseExecutionAdapter):
             return market.yes_ask + self.config.slippage_ticks
 
         if intent.side == "no":
-            if market.yes_bid is None:
+            if market.no_ask is None:
                 return None
-            return max(market.yes_bid - self.config.slippage_ticks, Decimal("0.01"))
+            return min(market.no_ask + self.config.slippage_ticks, Decimal("0.99"))
 
         return None
 
     def _fill_qty(self, intent: OrderIntent, market: MarketState) -> int:
-        available_size = market.yes_ask_size if intent.side == "yes" else market.yes_bid_size
+        available_size = market.yes_ask_size if intent.side == "yes" else market.no_ask_size
         return min(intent.qty, available_size) if available_size is not None else intent.qty
 
     def _cancelled(self, order_id: str, intent: OrderIntent) -> FillResult:

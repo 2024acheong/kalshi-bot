@@ -40,6 +40,10 @@ def make_market(index: int = 0, **kwargs) -> MarketState:
         "status": MarketStatus.OPEN,
         "source": "test_fixture",
         "raw_sequence": index,
+        "no_bid": Decimal("0.51"),
+        "no_ask": Decimal("0.53"),
+        "no_bid_size": 100,
+        "no_ask_size": 100,
     }
     defaults.update(kwargs)
     return MarketState(**defaults)
@@ -124,9 +128,13 @@ def test_backtest_handles_spread_capture_pair(monkeypatch) -> None:
         make_market(
             index=0,
             yes_bid=Decimal("0.40"),
-            yes_ask=Decimal("0.46"),
+            yes_ask=Decimal("0.30"),
             yes_bid_size=100,
             yes_ask_size=100,
+            no_bid=Decimal("0.50"),
+            no_ask=Decimal("0.45"),
+            no_bid_size=100,
+            no_ask_size=100,
         ),
         make_market(
             index=1,
@@ -134,6 +142,10 @@ def test_backtest_handles_spread_capture_pair(monkeypatch) -> None:
             yes_ask=Decimal("0.39"),
             yes_bid_size=100,
             yes_ask_size=100,
+            no_bid=Decimal("0.50"),
+            no_ask=Decimal("0.70"),
+            no_bid_size=100,
+            no_ask_size=100,
         ),
     ]
     patch_loader(monkeypatch, snapshots)
