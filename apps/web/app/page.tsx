@@ -1,5 +1,6 @@
 import { formatAge, formatCurrency, formatDateTime, formatNumber } from '@/components/Format'
 import { StatusBadge } from '@/components/StatusBadge'
+import { fetchAllRows } from '@/lib/fetchAllRows'
 import { supabase } from '@/lib/supabase'
 
 export const dynamic = 'force-dynamic'
@@ -26,6 +27,12 @@ type OrderRow = {
   fills?: FillRow[] | null
 }
 
+type OrderMetricRow = {
+  id: string
+  risk_decision: string | null
+  fills?: { id: string }[] | null
+}
+
 function startOfTodayIso() {
   const start = new Date()
   start.setHours(0, 0, 0, 0)
@@ -42,6 +49,7 @@ export default async function OverviewPage() {
   const [
     ordersToday,
     fillsToday,
+    orderMetricsToday,
     latestSnapshot,
     latestHeartbeat,
     recentOrders,
@@ -50,10 +58,26 @@ export default async function OverviewPage() {
       .from('orders')
       .select('id', { count: 'exact', head: true })
       .gte('created_at', startIso),
-    supabase
-      .from('fills')
-      .select('fill_qty, fill_price, fee, created_at')
-      .gte('created_at', startIso),
+    fetchAllRows<FillRow>((from, to) =>
+      supabase
+        .from('fills')
+        .select('id,fill_qty,fill_price,fee,fill_type,created_at')
+        .gte('created_at', startIso)
+        .range(from, to),
+    ),
+    fetchAllRows<OrderMetricRow>((from, to) =>
+      supabase
+        .from('orders')
+        .select(`
+          id,
+          risk_decision,
+          fills (
+            id
+          )
+        `)
+        .gte('created_at', startIso)
+        .range(from, to),
+    ),
     supabase
       .from('market_snapshots')
       .select('created_at')
@@ -90,7 +114,8 @@ export default async function OverviewPage() {
       .limit(15),
   ])
 
-  const fills = (fillsToday.data ?? []) as FillRow[]
+  const fills = fillsToday.data
+  const orderMetrics = orderMetricsToday.data
   const grossExposure = fills.reduce((total, fill) => total + fillGross(fill), 0)
   const feesPaid = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
   const latestSnapshotAt = latestSnapshot.data?.[0]?.created_at ?? null
@@ -99,9 +124,9 @@ export default async function OverviewPage() {
   const workerIsStale =
     !latestActivity || Date.now() - new Date(latestActivity).getTime() > 2 * 60 * 1000
   const recent = (recentOrders.data ?? []) as OrderRow[]
-  const allowedOrders = recent.filter((order) => order.risk_decision === 'allow').length
-  const blockedOrders = recent.filter((order) => order.risk_decision === 'block').length
-  const filledOrders = recent.filter((order) => (order.fills ?? []).length > 0).length
+  const allowedOrders = orderMetrics.filter((order) => order.risk_decision === 'allow').length
+  const blockedOrders = orderMetrics.filter((order) => order.risk_decision === 'block').length
+  const filledOrders = orderMetrics.filter((order) => (order.fills ?? []).length > 0).length
   const activityBars = recent.length > 0
     ? recent
         .slice()
