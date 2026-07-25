@@ -156,15 +156,22 @@ class MacroEstimator(ProbabilityEstimator):
         Return a clipped YES probability, or None on missing data/model/parse.
         """
         if self.model is None:
+            LOGGER.info("macro_estimator_skip ticker=%s reason=model_missing", market.ticker)
             return None
 
         try:
             parsed = self._parse_ticker(market.ticker)
             if parsed is None:
+                LOGGER.info("macro_estimator_skip ticker=%s reason=parse_failed", market.ticker)
                 return None
 
             model_features = self._feature_vector_for_market(parsed, features.timestamp)
             if model_features is None:
+                LOGGER.info(
+                    "macro_estimator_skip ticker=%s reason=missing_features parsed=%s",
+                    market.ticker,
+                    parsed,
+                )
                 return None
 
             probability = self._predict_probability(model_features)
