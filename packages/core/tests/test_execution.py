@@ -22,6 +22,10 @@ def make_market(**kwargs) -> MarketState:
         "close_time": now + timedelta(hours=24),
         "status": MarketStatus.OPEN,
         "source": "rest_poll",
+        "no_bid": Decimal("0.52"),
+        "no_ask": Decimal("0.53"),
+        "no_bid_size": 100,
+        "no_ask_size": 100,
     }
     defaults.update(kwargs)
     return MarketState(**defaults)
@@ -167,26 +171,51 @@ def test_zero_fill_qty_has_zero_fee():
 def test_no_side_limit_order_logic():
     result = PaperAdapter().submit_order(
         "order-1",
-        make_intent(side="no", price=Decimal("0.45")),
+        make_intent(side="no", price=Decimal("0.55")),
         "limit",
-        make_market(yes_bid=Decimal("0.47")),
+        make_market(no_ask=Decimal("0.53")),
     )
 
     assert result.status == OrderIntentStatus.FILLED
-    assert result.fill_price == Decimal("0.47")
+    assert result.fill_price == Decimal("0.53")
     assert result.fill_qty == 100
 
 
 def test_no_side_limit_order_does_not_fill_on_touch():
     result = PaperAdapter().submit_order(
         "order-1",
-        make_intent(side="no", price=Decimal("0.47")),
+        make_intent(side="no", price=Decimal("0.53")),
         "limit",
-        make_market(yes_bid=Decimal("0.47")),
+        make_market(no_ask=Decimal("0.53")),
     )
 
     assert result.status == OrderIntentStatus.CANCELLED
     assert result.fill_qty == 0
+
+
+def test_no_side_market_order_uses_no_ask_with_slippage():
+    result = PaperAdapter().submit_order(
+        "order-1",
+        make_intent(side="no", price=Decimal("0.53")),
+        "market",
+        make_market(no_ask=Decimal("0.53")),
+    )
+
+    assert result.status == OrderIntentStatus.FILLED
+    assert result.fill_price == Decimal("0.54")
+    assert result.fill_qty == 100
+
+
+def test_no_side_fill_uses_no_ask_size():
+    result = PaperAdapter().submit_order(
+        "order-1",
+        make_intent(side="no", price=Decimal("0.55"), qty=100),
+        "limit",
+        make_market(no_ask=Decimal("0.53"), no_ask_size=25, yes_bid_size=100),
+    )
+
+    assert result.status == OrderIntentStatus.PARTIALLY_FILLED
+    assert result.fill_qty == 25
 
 
 def test_configurable_fee_per_contract():
