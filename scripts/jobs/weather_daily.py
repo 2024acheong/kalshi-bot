@@ -8,6 +8,7 @@ from _bootstrap import add_repo_paths
 
 add_repo_paths()
 
+from services.models.weather.backfill_markets import backfill_weather_markets
 from services.models.weather.market_outcomes import collect_weather_market_outcomes
 from services.models.weather.outcomes import backfill_ncei_daily_summary_outcomes
 from services.models.weather.train import train_weather_model
@@ -20,6 +21,7 @@ def _weather_cities() -> list[str]:
 
 async def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    backfill_weather_markets()
     for city in _weather_cities():
         await backfill_ncei_daily_summary_outcomes(city)
     collect_weather_market_outcomes()
