@@ -28,6 +28,7 @@ type FillWithOrder = FillRow & {
   orders?:
     | {
         run_id: string | null
+        ticker: string | null
         side: string | null
         signal_id: string | null
         signals?: SignalRelation | SignalRelation[] | null
@@ -35,6 +36,7 @@ type FillWithOrder = FillRow & {
       }
     | {
         run_id: string | null
+        ticker: string | null
         side: string | null
         signal_id: string | null
         signals?: SignalRelation | SignalRelation[] | null
@@ -72,6 +74,17 @@ type MarketSnapshotRow = {
   timestamp: string | null
 }
 
+type RealizedLot = {
+  qty: number
+  cost: number
+  fees: number
+}
+
+type RealizedRunPnl = {
+  realizedFees: number
+  realizedPnl: number
+}
+
 function firstRelation<T>(value: T | T[] | null | undefined) {
   return Array.isArray(value) ? value[0] ?? null : value ?? null
 }
@@ -95,8 +108,110 @@ function signalPayload(fill: FillWithOrder) {
   return firstRelation(parentOrder(fill)?.signals)?.signal_payload ?? null
 }
 
-function buildFillEvents(fills: FillWithOrder[]) {
-  const nonArbEvents: PerformanceFillEvent[] = []
+function oppositeSide(side: string | null | undefined) {
+  if (side === 'yes') {
+    return 'no'
+  }
+  if (side === 'no') {
+    return 'yes'
+  }
+  return null
+}
+
+function sortedFills(fills: FillWithOrder[]) {
+  return fills
+    .slice()
+    .sort(
+      (a, b) =>
+        new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime(),
+    )
+}
+
+function positionKey(runId: string, ticker: string | null | undefined, side: string) {
+  return `${runId}:${ticker ?? 'unknown'}:${side}`
+}
+
+function buildRealizedPnl(fills: FillWithOrder[]) {
+  const lots = new Map<string, RealizedLot[]>()
+  const byRun = new Map<string, RealizedRunPnl>()
+  const events: PerformanceFillEvent[] = []
+
+  for (const fill of sortedFills(fills)) {
+    if (!fill.created_at) {
+      continue
+    }
+    const order = parentOrder(fill)
+    const run = firstRelation(order?.strategy_runs)
+    const runId = order?.run_id ?? run?.id ?? 'unknown'
+    const label = runLabel(run, runId)
+    if (label.startsWith('spread_capture')) {
+      continue
+    }
+
+    const side = order?.side
+    const qty = Number(fill.fill_qty ?? 0)
+    if (qty <= 0 || (side !== 'yes' && side !== 'no')) {
+      continue
+    }
+
+    const notional = fillNotional(fill)
+    const fee = Number(fill.fee ?? 0)
+    if (!signalPayload(fill)?.is_closing_order) {
+      const key = positionKey(runId, order?.ticker, side)
+      const runLots = lots.get(key) ?? []
+      runLots.push({ qty, cost: notional, fees: fee })
+      lots.set(key, runLots)
+      continue
+    }
+
+    const openedSide = oppositeSide(side)
+    if (!openedSide) {
+      continue
+    }
+    const key = positionKey(runId, order?.ticker, openedSide)
+    const runLots = lots.get(key) ?? []
+    let remainingQty = qty
+    let realizedPnl = 0
+    let realizedFees = 0
+    const closeAvg = notional / qty
+
+    while (remainingQty > 0 && runLots.length > 0) {
+      const lot = runLots[0]
+      const matchedQty = Math.min(remainingQty, lot.qty)
+      const entryAvg = lot.cost / lot.qty
+      const entryFeeShare = (lot.fees * matchedQty) / lot.qty
+      const closeFeeShare = (fee * matchedQty) / qty
+      realizedPnl += matchedQty * (1 - entryAvg - closeAvg) - entryFeeShare - closeFeeShare
+      realizedFees += entryFeeShare + closeFeeShare
+
+      lot.qty -= matchedQty
+      lot.cost -= entryAvg * matchedQty
+      lot.fees -= entryFeeShare
+      remainingQty -= matchedQty
+      if (lot.qty <= 0) {
+        runLots.shift()
+      }
+    }
+
+    lots.set(key, runLots)
+    if (realizedFees > 0 || realizedPnl !== 0) {
+      const row = byRun.get(runId) ?? { realizedFees: 0, realizedPnl: 0 }
+      row.realizedFees += realizedFees
+      row.realizedPnl += realizedPnl
+      byRun.set(runId, row)
+      events.push({
+        runId,
+        label,
+        timestamp: fill.created_at,
+        signedValue: realizedPnl,
+      })
+    }
+  }
+
+  return { byRun, events }
+}
+
+function buildSpreadArbEvents(fills: FillWithOrder[]) {
   const arbPairs = new Map<
     string,
     {
@@ -111,7 +226,7 @@ function buildFillEvents(fills: FillWithOrder[]) {
       noFees: number
     }
   >()
-  for (const fill of fills) {
+  for (const fill of sortedFills(fills)) {
     if (!fill.created_at) {
       continue
     }
@@ -119,7 +234,6 @@ function buildFillEvents(fills: FillWithOrder[]) {
     const run = firstRelation(order?.strategy_runs)
     const runId = order?.run_id ?? run?.id ?? 'unknown'
     const label = runLabel(run, runId)
-    const isClosing = Boolean(signalPayload(fill)?.is_closing_order)
     const notional = fillNotional(fill)
     const fee = Number(fill.fee ?? 0)
     const signalId = order?.signal_id
@@ -156,15 +270,6 @@ function buildFillEvents(fills: FillWithOrder[]) {
       arbPairs.set(pairKey, pair)
       continue
     }
-    if (!isClosing) {
-      continue
-    }
-    nonArbEvents.push({
-      runId,
-      label,
-      timestamp: fill.created_at,
-      signedValue: notional - fee,
-    })
   }
   const arbEvents = [...arbPairs.values()].flatMap((pair) => {
     const matchedQty = Math.min(pair.yesQty, pair.noQty)
@@ -185,7 +290,7 @@ function buildFillEvents(fills: FillWithOrder[]) {
       },
     ]
   })
-  return [...arbEvents, ...nonArbEvents].sort(
+  return arbEvents.sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   )
 }
@@ -203,6 +308,7 @@ export default async function PerformancePage() {
           created_at,
           orders (
             run_id,
+            ticker,
             side,
             signal_id,
             signals (
@@ -290,6 +396,8 @@ export default async function PerformancePage() {
       notional: number
       latest: string | null
       openMarkPnl: number
+      realizedFees: number
+      realizedPnl: number
       signals: number
       edgeTotal: number
       probabilityTotal: number
@@ -325,6 +433,8 @@ export default async function PerformancePage() {
         notional: 0,
         latest: null,
         openMarkPnl: 0,
+        realizedFees: 0,
+        realizedPnl: 0,
         signals: 0,
         edgeTotal: 0,
         probabilityTotal: 0,
@@ -425,6 +535,8 @@ export default async function PerformancePage() {
         notional: 0,
         latest: null,
         openMarkPnl: 0,
+        realizedFees: 0,
+        realizedPnl: 0,
         signals: 0,
         edgeTotal: 0,
         probabilityTotal: 0,
@@ -435,15 +547,24 @@ export default async function PerformancePage() {
     byRun.set(signal.run_id, row)
   }
 
+  const realized = buildRealizedPnl(fills)
+  for (const [runId, realizedRow] of realized.byRun.entries()) {
+    const row = byRun.get(runId)
+    if (row) {
+      row.realizedFees += realizedRow.realizedFees
+      row.realizedPnl += realizedRow.realizedPnl
+    }
+  }
+
   const rows = [...byRun.entries()]
     .map(([runId, row]) => {
-      const nonArbFees = row.fees - row.lockedArbFees
-      const paperPnl = row.openMarkPnl + row.lockedArbPnl - nonArbFees
+      const unmatchedFees = row.fees - row.lockedArbFees - row.realizedFees
+      const paperPnl = row.openMarkPnl + row.lockedArbPnl + row.realizedPnl - unmatchedFees
       return {
         runId,
         ...row,
         paperPnl,
-        nonArbFees,
+        unmatchedFees,
         fillRate: row.signals === 0 ? null : row.fills / row.signals,
         avgEdge: row.signals === 0 ? null : row.edgeTotal / row.signals,
         avgProbability: row.signals === 0 ? null : row.probabilityTotal / row.signals,
@@ -459,7 +580,9 @@ export default async function PerformancePage() {
     rows.length === 0
       ? null
       : rows.reduce((total, row) => total + Number(row.fillRate ?? 0), 0) / rows.length
-  const fillEvents = buildFillEvents(fills)
+  const fillEvents = [...buildSpreadArbEvents(fills), ...realized.events].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  )
 
   return (
     <>
@@ -509,6 +632,7 @@ export default async function PerformancePage() {
               <th>Strategy Run</th>
               <th>Mode</th>
               <th>Paper PnL</th>
+              <th>Realized</th>
               <th>Locked Arb</th>
               <th>Open Mark</th>
               <th>Fees</th>
@@ -528,6 +652,7 @@ export default async function PerformancePage() {
                 <td className={row.paperPnl >= 0 ? 'green mono' : 'red mono'}>
                   {formatCurrency(row.paperPnl)}
                 </td>
+                <td>{formatCurrency(row.realizedPnl)}</td>
                 <td>{formatCurrency(row.lockedArbPnl)}</td>
                 <td>{formatCurrency(row.openMarkPnl)}</td>
                 <td>{formatCurrency(row.fees)}</td>
