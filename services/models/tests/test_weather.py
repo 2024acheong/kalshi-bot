@@ -7,6 +7,11 @@ import pytest
 
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
 from services.models.shared.artifact_store import save_artifact
+from services.models.weather.backfill_markets import (
+    backfill_weather_markets,
+    catalog_row_from_kalshi_market,
+    default_weather_series_tickers,
+)
 from services.models.weather.estimator import WeatherEnsembleEstimator, compute_ensemble_features
 from services.models.weather.market_outcomes import (
     build_weather_market_outcome_row,
@@ -352,6 +357,73 @@ def test_store_weather_market_outcome_upserts_by_ticker(monkeypatch) -> None:
     assert fake.table_name == "weather_market_outcomes"
     assert fake.table_obj.conflict == "ticker"
     assert fake.table_obj.payload["ticker"] == "KXHIGHNY-26MAY21-T75"
+
+
+def test_weather_catalog_row_maps_settled_market_to_resolved() -> None:
+    row = catalog_row_from_kalshi_market(
+        {
+            "ticker": "KXHIGHNY-26MAY21-T75",
+            "title": "Will the high temp in NYC be >75°?",
+            "category": "weather",
+            "close_time": "2026-05-22T03:59:00Z",
+            "status": "settled",
+            "updated_time": "2026-05-22T04:01:00Z",
+        }
+    )
+
+    assert row["ticker"] == "KXHIGHNY-26MAY21-T75"
+    assert row["status"] == "resolved"
+    assert row["category"] == "weather"
+    assert row["close_time"] == "2026-05-22T03:59:00+00:00"
+
+
+def test_backfill_weather_markets_fetches_and_upserts_unique_rows(monkeypatch) -> None:
+    fetched = {
+        ("KXHIGHNY", "closed"): [
+            {
+                "ticker": "KXHIGHNY-26MAY21-T75",
+                "title": "Will the high temp in NYC be >75°?",
+                "status": "closed",
+            }
+        ],
+        ("KXHIGHNY", "settled"): [
+            {
+                "ticker": "KXHIGHNY-26MAY21-T75",
+                "title": "Will the high temp in NYC be >75°?",
+                "status": "settled",
+                "result": "yes",
+            }
+        ],
+    }
+    upserted_rows = []
+
+    monkeypatch.setattr(
+        "services.models.weather.backfill_markets.fetch_kalshi_markets",
+        lambda series, status: fetched.get((series, status), []),
+    )
+    monkeypatch.setattr(
+        "services.models.weather.backfill_markets.upsert_market_catalog_rows",
+        lambda rows: upserted_rows.extend(rows) or len(rows),
+    )
+
+    stored = backfill_weather_markets(
+        series_tickers=["KXHIGHNY"],
+        statuses=["closed", "settled"],
+    )
+
+    assert stored == 1
+    assert len(upserted_rows) == 1
+    assert upserted_rows[0]["ticker"] == "KXHIGHNY-26MAY21-T75"
+    assert upserted_rows[0]["status"] == "resolved"
+
+
+def test_default_weather_series_tickers_include_supported_high_low_markets() -> None:
+    series = default_weather_series_tickers()
+
+    assert "KXHIGHNY" in series
+    assert "KXLOWNY" in series
+    assert "KXHIGHMIA" in series
+    assert "KXLOWMIA" in series
 
 
 def test_collect_weather_market_outcomes_matches_catalog_to_actuals(monkeypatch) -> None:
