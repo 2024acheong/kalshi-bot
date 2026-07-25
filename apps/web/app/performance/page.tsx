@@ -1,4 +1,5 @@
 import { formatCurrency, formatDateTime, formatNumber, formatPercent } from '@/components/Format'
+import { fetchAllRows } from '@/lib/fetchAllRows'
 import { supabase } from '@/lib/supabase'
 
 export const dynamic = 'force-dynamic'
@@ -183,38 +184,44 @@ function PerformanceChart({ curves }: { curves: ReturnType<typeof buildCurves> }
 
 export default async function PerformancePage() {
   const [ordersResponse, positionsResponse, signalsResponse] = await Promise.all([
-    supabase
-      .from('orders')
-      .select(`
-        id,
-        run_id,
-        status,
-        risk_decision,
-        price,
-        qty,
-        created_at,
-        fills (
-          fill_price,
-          fill_qty,
-          fee,
-          created_at
-        ),
-        signals (
-          signal_payload
-        ),
-        strategy_runs (
+    fetchAllRows<OrderRow>((from, to) =>
+      supabase
+        .from('orders')
+        .select(`
           id,
-          mode,
-          strategy_configs (
-            name,
-            version
+          run_id,
+          status,
+          risk_decision,
+          price,
+          qty,
+          created_at,
+          fills (
+            fill_price,
+            fill_qty,
+            fee,
+            created_at
+          ),
+          signals (
+            signal_payload
+          ),
+          strategy_runs (
+            id,
+            mode,
+            strategy_configs (
+              name,
+              version
+            )
           )
-        )
-      `)
-      .order('created_at', { ascending: false })
-      .limit(1000),
-    supabase.from('positions').select('run_id,qty,unrealized_pnl'),
-    supabase.from('signals').select('run_id,edge,prob_estimate').limit(5000),
+        `)
+        .order('created_at', { ascending: false })
+        .range(from, to),
+    ),
+    fetchAllRows<PositionRow>((from, to) =>
+      supabase.from('positions').select('run_id,qty,unrealized_pnl').range(from, to),
+    ),
+    fetchAllRows<SignalRow>((from, to) =>
+      supabase.from('signals').select('run_id,edge,prob_estimate').range(from, to),
+    ),
   ])
 
   const firstError = ordersResponse.error ?? positionsResponse.error ?? signalsResponse.error
@@ -222,9 +229,9 @@ export default async function PerformancePage() {
     return <div className="card red">Error loading performance: {firstError.message}</div>
   }
 
-  const orders = (ordersResponse.data ?? []) as unknown as OrderRow[]
-  const positions = (positionsResponse.data ?? []) as PositionRow[]
-  const signals = (signalsResponse.data ?? []) as SignalRow[]
+  const orders = ordersResponse.data
+  const positions = positionsResponse.data
+  const signals = signalsResponse.data
   const byRun = new Map<
     string,
     {
