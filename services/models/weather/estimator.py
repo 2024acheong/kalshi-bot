@@ -230,15 +230,22 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
         it may be called for every market tick.
         """
         if self.model is None:
+            LOGGER.info("weather_estimator_skip ticker=%s reason=model_missing", market.ticker)
             return None
 
         try:
             parsed = self._parse_ticker(market.ticker)
             if parsed is None:
+                LOGGER.info("weather_estimator_skip ticker=%s reason=parse_failed", market.ticker)
                 return None
 
             rows = self._fetch_latest_ensemble_rows(parsed)
             if not rows:
+                LOGGER.info(
+                    "weather_estimator_skip ticker=%s reason=missing_ensemble_rows parsed=%s",
+                    market.ticker,
+                    parsed,
+                )
                 return None
 
             member_temperatures: dict[int, list[float]] = defaultdict(list)
@@ -248,6 +255,10 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
                     continue
                 member_temperatures[int(row.get("ensemble_member", 0))].append(float(temperature))
             if not member_temperatures:
+                LOGGER.info(
+                    "weather_estimator_skip ticker=%s reason=missing_member_temperatures",
+                    market.ticker,
+                )
                 return None
 
             kind = str(parsed["kind"]).upper()
@@ -258,6 +269,7 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
             ]
             stats = compute_ensemble_features(daily_values)
             if stats is None:
+                LOGGER.info("weather_estimator_skip ticker=%s reason=missing_stats", market.ticker)
                 return None
 
             hours_to_target = features.time_to_close_hours
@@ -272,6 +284,10 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
             if strike_type == "threshold":
                 strike_type = self._resolve_threshold_strike_type(market.ticker)
                 if strike_type is None:
+                    LOGGER.info(
+                        "weather_estimator_skip ticker=%s reason=unresolved_threshold_direction",
+                        market.ticker,
+                    )
                     return None
 
             if strike_type == "between":
@@ -286,6 +302,10 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
                     float(parsed["upper_f"]) + 0.5,
                 )
                 if lower_probability is None or upper_probability is None:
+                    LOGGER.info(
+                        "weather_estimator_skip ticker=%s reason=between_probability_none",
+                        market.ticker,
+                    )
                     return None
                 probability = lower_probability - upper_probability
             else:
@@ -295,6 +315,10 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
                     float(parsed["threshold_f"]),
                 )
                 if probability is None:
+                    LOGGER.info(
+                        "weather_estimator_skip ticker=%s reason=threshold_probability_none",
+                        market.ticker,
+                    )
                     return None
                 if strike_type == "less":
                     probability = 1.0 - probability

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import logging
 
 import pytest
 
@@ -168,6 +169,46 @@ def test_no_entry_within_no_bet_zone() -> None:
     ).evaluate_entry(make_market(), make_features(), run_id="run-1")
 
     assert intent is None
+
+
+def test_logs_hold_reason_when_estimator_returns_none(caplog) -> None:
+    strategy = CalibrationMispricingStrategy(
+        estimator=FixedEstimator(None),
+        hold_log_interval_seconds=60,
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.strategies.calibration_mispricing"):
+        intent = strategy.evaluate_entry(make_market(), make_features(), run_id="run-1")
+
+    assert intent is None
+    assert "calibration_hold" in caplog.text
+    assert "reason=model_prob_none" in caplog.text
+
+
+def test_hold_reason_logging_is_throttled(caplog) -> None:
+    strategy = CalibrationMispricingStrategy(
+        estimator=FixedEstimator(None),
+        hold_log_interval_seconds=60,
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.strategies.calibration_mispricing"):
+        strategy.evaluate_entry(make_market(), make_features(), run_id="run-1")
+        strategy.evaluate_entry(make_market(), make_features(), run_id="run-1")
+
+    assert caplog.text.count("calibration_hold") == 1
+
+
+def test_logs_inside_spread_hold_reason(caplog) -> None:
+    strategy = CalibrationMispricingStrategy(
+        estimator=FixedEstimator(0.42),
+        hold_log_interval_seconds=60,
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.strategies.calibration_mispricing"):
+        intent = strategy.evaluate_entry(make_market(), make_features(), run_id="run-1")
+
+    assert intent is None
+    assert "reason=inside_spread" in caplog.text
 
 
 def test_no_entry_insufficient_time() -> None:
