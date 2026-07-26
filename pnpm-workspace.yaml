@@ -1,3 +1,6 @@
 packages:
-  - "apps/web"
-  - "packages/contracts"
+  - apps/web
+  - packages/contracts
+
+onlyBuiltDependencies:
+  - sharp@0.34.5

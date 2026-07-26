@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from core.execution.adapters import FillResult
+from core.execution.fees import compute_kalshi_fee
 from core.execution.resting_orders import RestingOrder
 from core.risk.engine import OrderIntent
 from core.schemas.market import OrderIntentStatus
@@ -17,6 +18,8 @@ def _get_supabase() -> Any:
 
 
 _ENSURED_CATALOG_TICKERS: set[str] = set()
+DEFAULT_PAPER_STARTING_CASH = Decimal("10000")
+PAPER_BUYING_POWER_BLOCK = "insufficient_paper_buying_power"
 
 
 def _response_id(response: Any, table: str) -> str:
@@ -28,6 +31,12 @@ def _response_id(response: Any, table: str) -> str:
 def _is_duplicate_key_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return "23505" in text or "duplicate key" in text
+
+
+def _as_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    return Decimal(str(value))
 
 
 def ensure_market_catalog_entry(ticker: str) -> None:
@@ -122,6 +131,328 @@ def get_or_create_strategy_run(config_id: str, mode: str = "paper") -> str:
     if rows:
         return str(rows[0]["id"])
     return create_strategy_run(config_id=config_id, mode=mode)
+
+
+def get_or_create_paper_account(
+    config_id: str,
+    *,
+    starting_cash: Decimal = DEFAULT_PAPER_STARTING_CASH,
+) -> dict[str, Any]:
+    response = (
+        _get_supabase()
+        .table("paper_accounts")
+        .select("id,config_id,name,starting_cash,cash_balance,reserved_cash,status")
+        .eq("config_id", config_id)
+        .eq("name", "default")
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(response, "data", None) or []
+    if rows:
+        return rows[0]
+
+    row = {
+        "config_id": config_id,
+        "name": "default",
+        "starting_cash": str(starting_cash),
+        "cash_balance": str(starting_cash),
+        "reserved_cash": "0",
+        "status": "active",
+    }
+    created = _get_supabase().table("paper_accounts").insert(row).execute()
+    account_id = _response_id(created, "paper_accounts")
+    account = {
+        "id": account_id,
+        **row,
+    }
+    insert_paper_ledger_entry(
+        account_id=account_id,
+        entry_type="initial_deposit",
+        amount=starting_cash,
+        cash_balance_after=starting_cash,
+        reserved_cash_after=Decimal("0"),
+        metadata={"config_id": config_id},
+    )
+    return account
+
+
+def paper_account_available_cash(account: dict[str, Any]) -> Decimal:
+    return _as_decimal(account.get("cash_balance")) - _as_decimal(
+        account.get("reserved_cash")
+    )
+
+
+def estimate_order_cash(intent: OrderIntent) -> Decimal:
+    notional = intent.price * intent.qty
+    fee = compute_kalshi_fee(intent.price, intent.qty)
+    return notional + fee
+
+
+def insert_paper_ledger_entry(
+    *,
+    account_id: str,
+    entry_type: str,
+    amount: Decimal,
+    cash_balance_after: Decimal,
+    reserved_cash_after: Decimal,
+    run_id: str | None = None,
+    order_id: str | None = None,
+    fill_id: str | None = None,
+    ticker: str | None = None,
+    side: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    row = {
+        "account_id": account_id,
+        "run_id": run_id,
+        "order_id": order_id,
+        "fill_id": fill_id,
+        "ticker": ticker,
+        "side": side,
+        "entry_type": entry_type,
+        "amount": str(amount),
+        "cash_balance_after": str(cash_balance_after),
+        "reserved_cash_after": str(reserved_cash_after),
+        "metadata_json": metadata or {},
+    }
+    response = _get_supabase().table("paper_ledger_entries").insert(row).execute()
+    return _response_id(response, "paper_ledger_entries")
+
+
+def update_paper_account_balances(
+    account_id: str,
+    *,
+    cash_balance: Decimal,
+    reserved_cash: Decimal,
+) -> None:
+    row = {
+        "cash_balance": str(cash_balance),
+        "reserved_cash": str(reserved_cash),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _get_supabase().table("paper_accounts").update(row).eq("id", account_id).execute()
+
+
+def reserve_paper_order_cash(
+    *,
+    account: dict[str, Any],
+    run_id: str,
+    order_id: str,
+    intent: OrderIntent,
+) -> bool:
+    required_cash = estimate_order_cash(intent)
+    if paper_account_available_cash(account) < required_cash:
+        return False
+
+    account_id = str(account["id"])
+    cash_balance = _as_decimal(account.get("cash_balance"))
+    reserved_cash = _as_decimal(account.get("reserved_cash")) + required_cash
+    update_paper_account_balances(
+        account_id,
+        cash_balance=cash_balance,
+        reserved_cash=reserved_cash,
+    )
+    insert_paper_ledger_entry(
+        account_id=account_id,
+        run_id=run_id,
+        order_id=order_id,
+        ticker=intent.ticker,
+        side=intent.side,
+        entry_type="reserve",
+        amount=required_cash,
+        cash_balance_after=cash_balance,
+        reserved_cash_after=reserved_cash,
+        metadata={
+            "price": str(intent.price),
+            "qty": intent.qty,
+            "estimated_fee": str(compute_kalshi_fee(intent.price, intent.qty)),
+        },
+    )
+    account["reserved_cash"] = str(reserved_cash)
+    return True
+
+
+def release_paper_order_cash(
+    *,
+    account: dict[str, Any],
+    run_id: str,
+    order_id: str,
+    intent: OrderIntent,
+    qty: int | None = None,
+    reason: str = "cancelled",
+) -> Decimal:
+    release_intent = OrderIntent(
+        ticker=intent.ticker,
+        side=intent.side,
+        price=intent.price,
+        qty=qty if qty is not None else intent.qty,
+        estimated_edge=intent.estimated_edge,
+        model_prob=intent.model_prob,
+        run_id=intent.run_id,
+        signal_id=intent.signal_id,
+        is_closing_order=intent.is_closing_order,
+    )
+    release_amount = min(
+        estimate_order_cash(release_intent),
+        _as_decimal(account.get("reserved_cash")),
+    )
+    if release_amount <= 0:
+        return Decimal("0")
+
+    account_id = str(account["id"])
+    cash_balance = _as_decimal(account.get("cash_balance"))
+    reserved_cash = _as_decimal(account.get("reserved_cash")) - release_amount
+    update_paper_account_balances(
+        account_id,
+        cash_balance=cash_balance,
+        reserved_cash=reserved_cash,
+    )
+    insert_paper_ledger_entry(
+        account_id=account_id,
+        run_id=run_id,
+        order_id=order_id,
+        ticker=intent.ticker,
+        side=intent.side,
+        entry_type="release_reserve",
+        amount=release_amount,
+        cash_balance_after=cash_balance,
+        reserved_cash_after=reserved_cash,
+        metadata={"reason": reason, "qty": release_intent.qty},
+    )
+    account["reserved_cash"] = str(reserved_cash)
+    return release_amount
+
+
+def record_paper_fill_accounting(
+    *,
+    account: dict[str, Any],
+    run_id: str,
+    order_id: str,
+    fill_id: str,
+    intent: OrderIntent,
+    fill_result: FillResult,
+    release_reserved_qty: int = 0,
+) -> None:
+    if fill_result.fill_qty <= 0:
+        return
+
+    account_id = str(account["id"])
+    notional = fill_result.fill_price * fill_result.fill_qty
+    fee = fill_result.fee
+    reserve_release = Decimal("0")
+    if release_reserved_qty > 0:
+        release_intent = OrderIntent(
+            ticker=intent.ticker,
+            side=intent.side,
+            price=intent.price,
+            qty=release_reserved_qty,
+            estimated_edge=intent.estimated_edge,
+            model_prob=intent.model_prob,
+            run_id=intent.run_id,
+            signal_id=intent.signal_id,
+            is_closing_order=intent.is_closing_order,
+        )
+        reserve_release = min(
+            estimate_order_cash(release_intent),
+            _as_decimal(account.get("reserved_cash")),
+        )
+
+    cash_balance = _as_decimal(account.get("cash_balance")) - notional - fee
+    reserved_cash = _as_decimal(account.get("reserved_cash")) - reserve_release
+    if cash_balance < 0:
+        raise RuntimeError(
+            f"Paper account {account_id} cash would go negative for order {order_id}"
+        )
+    if reserved_cash < 0:
+        reserved_cash = Decimal("0")
+
+    update_paper_account_balances(
+        account_id,
+        cash_balance=cash_balance,
+        reserved_cash=reserved_cash,
+    )
+    if reserve_release > 0:
+        insert_paper_ledger_entry(
+            account_id=account_id,
+            run_id=run_id,
+            order_id=order_id,
+            fill_id=fill_id,
+            ticker=intent.ticker,
+            side=intent.side,
+            entry_type="release_reserve",
+            amount=reserve_release,
+            cash_balance_after=cash_balance,
+            reserved_cash_after=reserved_cash,
+            metadata={"reason": "filled", "qty": release_reserved_qty},
+        )
+    insert_paper_ledger_entry(
+        account_id=account_id,
+        run_id=run_id,
+        order_id=order_id,
+        fill_id=fill_id,
+        ticker=intent.ticker,
+        side=intent.side,
+        entry_type="fill_debit",
+        amount=-notional,
+        cash_balance_after=cash_balance,
+        reserved_cash_after=reserved_cash,
+        metadata={"fill_price": str(fill_result.fill_price), "fill_qty": fill_result.fill_qty},
+    )
+    if fee > 0:
+        insert_paper_ledger_entry(
+            account_id=account_id,
+            run_id=run_id,
+            order_id=order_id,
+            fill_id=fill_id,
+            ticker=intent.ticker,
+            side=intent.side,
+            entry_type="fill_fee",
+            amount=-fee,
+            cash_balance_after=cash_balance,
+            reserved_cash_after=reserved_cash,
+            metadata={"fill_qty": fill_result.fill_qty},
+        )
+    account["cash_balance"] = str(cash_balance)
+    account["reserved_cash"] = str(reserved_cash)
+
+
+def credit_paper_realized_value(
+    *,
+    account: dict[str, Any],
+    run_id: str,
+    order_id: str,
+    fill_id: str | None,
+    ticker: str,
+    side: str,
+    qty: int,
+    reason: str,
+) -> None:
+    if qty <= 0:
+        return
+
+    account_id = str(account["id"])
+    amount = Decimal(qty)
+    cash_balance = _as_decimal(account.get("cash_balance")) + amount
+    reserved_cash = _as_decimal(account.get("reserved_cash"))
+    update_paper_account_balances(
+        account_id,
+        cash_balance=cash_balance,
+        reserved_cash=reserved_cash,
+    )
+    insert_paper_ledger_entry(
+        account_id=account_id,
+        run_id=run_id,
+        order_id=order_id,
+        fill_id=fill_id,
+        ticker=ticker,
+        side=side,
+        entry_type="realized_credit",
+        amount=amount,
+        cash_balance_after=cash_balance,
+        reserved_cash_after=reserved_cash,
+        metadata={"reason": reason, "qty": qty},
+    )
+    account["cash_balance"] = str(cash_balance)
 
 
 def persist_order(

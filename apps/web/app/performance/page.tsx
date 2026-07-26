@@ -12,6 +12,7 @@ type ConfigRelation = {
 
 type RunRelation = {
   id: string
+  config_id: string | null
   mode: string | null
   strategy_configs?: ConfigRelation | ConfigRelation[] | null
 }
@@ -72,6 +73,15 @@ type MarketSnapshotRow = {
   yes_bid: number | string | null
   no_bid: number | string | null
   timestamp: string | null
+}
+
+type PaperAccountRow = {
+  id: string
+  config_id: string | null
+  starting_cash: number | string | null
+  cash_balance: number | string | null
+  reserved_cash: number | string | null
+  status: string | null
 }
 
 type RealizedLot = {
@@ -296,7 +306,13 @@ function buildSpreadArbEvents(fills: FillWithOrder[]) {
 }
 
 export default async function PerformancePage() {
-  const [fillsResponse, positionsResponse, signalsResponse, snapshotsResponse] = await Promise.all([
+  const [
+    fillsResponse,
+    positionsResponse,
+    signalsResponse,
+    snapshotsResponse,
+    accountsResponse,
+  ] = await Promise.all([
     fetchAllRows<FillWithOrder>(
       (from, to) => supabase
         .from('fills')
@@ -316,6 +332,7 @@ export default async function PerformancePage() {
             ),
             strategy_runs (
               id,
+              config_id,
               mode,
               strategy_configs (
                 name,
@@ -343,11 +360,12 @@ export default async function PerformancePage() {
           run_id,
           edge,
           prob_estimate,
-          strategy_runs (
-            id,
-            mode,
-            strategy_configs (
-              name,
+            strategy_runs (
+              id,
+              config_id,
+              mode,
+              strategy_configs (
+                name,
               version
             )
           )
@@ -366,10 +384,21 @@ export default async function PerformancePage() {
       1000,
       5000,
     ),
+    fetchAllRows<PaperAccountRow>((from, to) =>
+      supabase
+        .from('paper_accounts')
+        .select('id,config_id,starting_cash,cash_balance,reserved_cash,status')
+        .eq('status', 'active')
+        .range(from, to),
+    ),
   ])
 
   const firstError =
-    fillsResponse.error ?? positionsResponse.error ?? signalsResponse.error ?? snapshotsResponse.error
+    fillsResponse.error ??
+    positionsResponse.error ??
+    signalsResponse.error ??
+    snapshotsResponse.error ??
+    accountsResponse.error
   if (firstError) {
     return <div className="card red">Error loading performance: {firstError.message}</div>
   }
@@ -378,6 +407,12 @@ export default async function PerformancePage() {
   const positions = positionsResponse.data
   const signals = signalsResponse.data
   const snapshots = snapshotsResponse.data
+  const accounts = accountsResponse.data
+  const accountByConfigId = new Map(
+    accounts
+      .filter((account) => account.config_id)
+      .map((account) => [account.config_id as string, account]),
+  )
   const latestSnapshotByTicker = new Map<string, MarketSnapshotRow>()
   for (const snapshot of snapshots) {
     if (snapshot.ticker && !latestSnapshotByTicker.has(snapshot.ticker)) {
@@ -388,6 +423,7 @@ export default async function PerformancePage() {
     string,
     {
       label: string
+      configId: string | null
       mode: string
       fills: number
       fees: number
@@ -425,6 +461,7 @@ export default async function PerformancePage() {
       byRun.get(runId) ??
       {
         label: runLabel(run, order?.run_id ?? runId),
+        configId: run?.config_id ?? null,
         mode: run?.mode ?? 'paper',
         fills: 0,
         fees: 0,
@@ -527,6 +564,7 @@ export default async function PerformancePage() {
       byRun.get(signal.run_id) ??
       {
         label: runLabel(run, signal.run_id),
+        configId: run?.config_id ?? null,
         mode: run?.mode ?? 'paper',
         fills: 0,
         fees: 0,
@@ -560,10 +598,20 @@ export default async function PerformancePage() {
     .map(([runId, row]) => {
       const unmatchedFees = row.fees - row.lockedArbFees - row.realizedFees
       const paperPnl = row.openMarkPnl + row.lockedArbPnl + row.realizedPnl - unmatchedFees
+      const account = row.configId ? accountByConfigId.get(row.configId) ?? null : null
+      const startingCash = Number(account?.starting_cash ?? 0)
+      const cashBalance = Number(account?.cash_balance ?? 0)
+      const reservedCash = Number(account?.reserved_cash ?? 0)
+      const ledgerPnl = account ? cashBalance + reservedCash - startingCash : null
       return {
         runId,
         ...row,
         paperPnl,
+        account,
+        cashBalance,
+        reservedCash,
+        buyingPower: Math.max(cashBalance - reservedCash, 0),
+        ledgerPnl,
         unmatchedFees,
         fillRate: row.signals === 0 ? null : row.fills / row.signals,
         avgEdge: row.signals === 0 ? null : row.edgeTotal / row.signals,
@@ -576,6 +624,7 @@ export default async function PerformancePage() {
   const totalPaperPnl = rows.reduce((total, row) => total + row.paperPnl, 0)
   const totalFees = rows.reduce((total, row) => total + row.fees, 0)
   const totalFills = rows.reduce((total, row) => total + row.fills, 0)
+  const totalBuyingPower = rows.reduce((total, row) => total + row.buyingPower, 0)
   const avgFillRate =
     rows.length === 0
       ? null
@@ -609,8 +658,8 @@ export default async function PerformancePage() {
           <div className="cardValue">{formatCurrency(totalFees)}</div>
         </div>
         <div className="card">
-          <div className="cardLabel">Avg Fill Rate</div>
-          <div className="cardValue">{formatPercent(avgFillRate)}</div>
+          <div className="cardLabel">Buying Power</div>
+          <div className="cardValue green">{formatCurrency(totalBuyingPower)}</div>
         </div>
       </section>
 
@@ -635,6 +684,8 @@ export default async function PerformancePage() {
               <th>Realized</th>
               <th>Locked Arb</th>
               <th>Open Mark</th>
+              <th>Buying Power</th>
+              <th>Ledger PnL</th>
               <th>Fees</th>
               <th>Fills</th>
               <th>Fill Rate</th>
@@ -655,6 +706,10 @@ export default async function PerformancePage() {
                 <td>{formatCurrency(row.realizedPnl)}</td>
                 <td>{formatCurrency(row.lockedArbPnl)}</td>
                 <td>{formatCurrency(row.openMarkPnl)}</td>
+                <td>{row.account ? formatCurrency(row.buyingPower) : '-'}</td>
+                <td className={(row.ledgerPnl ?? 0) >= 0 ? 'green mono' : 'red mono'}>
+                  {row.ledgerPnl === null ? '-' : formatCurrency(row.ledgerPnl)}
+                </td>
                 <td>{formatCurrency(row.fees)}</td>
                 <td>{row.fills}</td>
                 <td>{formatPercent(row.fillRate)}</td>

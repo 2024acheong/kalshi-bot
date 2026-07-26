@@ -52,6 +52,15 @@ type PositionRow = {
   unrealized_pnl: number | string | null
 }
 
+type PaperAccountRow = {
+  id: string
+  config_id: string | null
+  starting_cash: number | string | null
+  cash_balance: number | string | null
+  reserved_cash: number | string | null
+  status: string | null
+}
+
 function latestDate(values: Array<string | null | undefined>) {
   const timestamps = values
     .filter(Boolean)
@@ -69,7 +78,14 @@ function paramsMode(params: Record<string, unknown> | null) {
 }
 
 export default async function StrategiesPage() {
-  const [configsResponse, runsResponse, ordersResponse, signalsResponse, positionsResponse] =
+  const [
+    configsResponse,
+    runsResponse,
+    ordersResponse,
+    signalsResponse,
+    positionsResponse,
+    accountsResponse,
+  ] =
     await Promise.all([
       fetchAllRows<StrategyConfigRow>((from, to) =>
         supabase
@@ -119,6 +135,13 @@ export default async function StrategiesPage() {
           .neq('qty', 0)
           .range(from, to),
       ),
+      fetchAllRows<PaperAccountRow>((from, to) =>
+        supabase
+          .from('paper_accounts')
+          .select('id,config_id,starting_cash,cash_balance,reserved_cash,status')
+          .eq('status', 'active')
+          .range(from, to),
+      ),
     ])
 
   const firstError =
@@ -126,7 +149,8 @@ export default async function StrategiesPage() {
     runsResponse.error ??
     ordersResponse.error ??
     signalsResponse.error ??
-    positionsResponse.error
+    positionsResponse.error ??
+    accountsResponse.error
   if (firstError) {
     return <div className="card red">Error loading strategies: {firstError.message}</div>
   }
@@ -136,7 +160,13 @@ export default async function StrategiesPage() {
   const orders = ordersResponse.data
   const signals = signalsResponse.data
   const positions = positionsResponse.data
+  const accounts = accountsResponse.data
   const runById = new Map(runs.map((run) => [run.id, run]))
+  const accountByConfigId = new Map(
+    accounts
+      .filter((account) => account.config_id)
+      .map((account) => [account.config_id as string, account]),
+  )
 
   const rows = configs.map((config) => {
     const configRuns = runs.filter((run) => run.config_id === config.id)
@@ -167,6 +197,12 @@ export default async function StrategiesPage() {
     )
     const fills = configOrders.flatMap((order) => order.fills ?? [])
     const fees = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
+    const account = accountByConfigId.get(config.id) ?? null
+    const startingCash = Number(account?.starting_cash ?? 0)
+    const cashBalance = Number(account?.cash_balance ?? 0)
+    const reservedCash = Number(account?.reserved_cash ?? 0)
+    const buyingPower = Math.max(cashBalance - reservedCash, 0)
+    const ledgerPnl = account ? cashBalance + reservedCash - startingCash : null
     return {
       config,
       latestRun,
@@ -180,6 +216,12 @@ export default async function StrategiesPage() {
       openPositions: configPositions.length,
       openPnl,
       fees,
+      account,
+      startingCash,
+      cashBalance,
+      reservedCash,
+      buyingPower,
+      ledgerPnl,
     }
   })
 
@@ -191,6 +233,8 @@ export default async function StrategiesPage() {
     0,
   )
   const totalFees = rows.reduce((total, row) => total + row.fees, 0)
+  const totalBuyingPower = rows.reduce((total, row) => total + row.buyingPower, 0)
+  const totalReservedCash = rows.reduce((total, row) => total + row.reservedCash, 0)
 
   return (
     <>
@@ -217,11 +261,11 @@ export default async function StrategiesPage() {
           <div className="cardValue">{positions.length}</div>
         </div>
         <div className="card">
-          <div className="cardLabel">Open PnL</div>
-          <div className={openPnl >= 0 ? 'cardValue green' : 'cardValue red'}>
-            {formatCurrency(openPnl)}
+          <div className="cardLabel">Buying Power</div>
+          <div className="cardValue green">
+            {formatCurrency(totalBuyingPower)}
           </div>
-          <div className="cardMeta">{formatCurrency(totalFees)} fees paid</div>
+          <div className="cardMeta">{formatCurrency(totalReservedCash)} reserved</div>
         </div>
       </section>
 
@@ -264,9 +308,19 @@ export default async function StrategiesPage() {
               <span className="mono blue">{formatNumber(row.avgEdge)}</span>
             </div>
             <div className="metricLine">
-              <span className="muted">Open PnL</span>
-              <span className={row.openPnl >= 0 ? 'mono green' : 'mono red'}>
-                {formatCurrency(row.openPnl)}
+              <span className="muted">Buying Power</span>
+              <span className="mono green">
+                {row.account ? formatCurrency(row.buyingPower) : '-'}
+              </span>
+            </div>
+            <div className="metricLine">
+              <span className="muted">Reserved</span>
+              <span className="mono">{row.account ? formatCurrency(row.reservedCash) : '-'}</span>
+            </div>
+            <div className="metricLine">
+              <span className="muted">Ledger PnL</span>
+              <span className={(row.ledgerPnl ?? 0) >= 0 ? 'mono green' : 'mono red'}>
+                {row.ledgerPnl === null ? '-' : formatCurrency(row.ledgerPnl)}
               </span>
             </div>
             <div className="metricLine">

@@ -102,14 +102,18 @@ def make_runtime(
     paper_adapter=None,
     history_window: int = 20,
     run_id: str = "run-1",
+    config_id: str | None = None,
+    paper_account: dict | None = None,
 ):
     return TradingRuntime(
         run_id=run_id,
+        config_id=config_id,
         tickers=["KXBTC-26APR-B90000"],
         strategy=strategy or DummyStrategy(),
         risk_engine=risk_engine or MagicMock(),
         paper_adapter=paper_adapter or MagicMock(),
         history_window=history_window,
+        paper_account=paper_account,
     )
 
 
@@ -702,6 +706,184 @@ async def test_runtime_skips_paper_adapter_when_blocked(monkeypatch) -> None:
     persist_fill.assert_not_called()
     paper_adapter.submit_order.assert_not_called()
     emit_alert.assert_called_once()
+
+
+def test_runtime_loads_paper_account_for_strategy_config(monkeypatch) -> None:
+    accounts = {
+        "config-1": {
+            "id": "account-1",
+            "cash_balance": "10000",
+            "reserved_cash": "0",
+        },
+        "config-2": {
+            "id": "account-2",
+            "cash_balance": "5000",
+            "reserved_cash": "250",
+        },
+    }
+    get_or_create = MagicMock(side_effect=lambda config_id: accounts[config_id])
+    monkeypatch.setattr("worker.runtime.get_or_create_paper_account", get_or_create)
+
+    first = make_runtime(config_id="config-1")
+    second = make_runtime(config_id="config-2")
+
+    assert first._paper_account["id"] == "account-1"
+    assert second._paper_account["id"] == "account-2"
+    assert first._portfolio_value_usd == 10000
+    assert second._portfolio_value_usd == 5000
+    assert second._current_exposure_usd == 250
+
+
+@pytest.mark.anyio
+async def test_runtime_blocks_market_order_when_paper_cash_is_insufficient(
+    monkeypatch,
+) -> None:
+    market = make_market()
+    intent = make_intent(price=Decimal("0.95"), qty=10)
+    strategy = MagicMock()
+    strategy.evaluate.return_value = intent
+    risk_engine = MagicMock()
+    risk_engine.evaluate.return_value = make_risk_result(intent, RiskDecision.ALLOW)
+    paper_adapter = MagicMock()
+    persist_order = MagicMock(return_value="order-1")
+    monkeypatch.setattr("worker.runtime.persist_order", persist_order)
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock())
+    emit_alert = MagicMock()
+    monkeypatch.setattr("worker.runtime.emit_alert", emit_alert)
+
+    runtime = make_runtime(
+        strategy=strategy,
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+        paper_account={
+            "id": "account-1",
+            "cash_balance": "1.00",
+            "reserved_cash": "0",
+        },
+    )
+    await runtime.on_market_update(market)
+
+    paper_adapter.submit_order.assert_not_called()
+    assert persist_order.call_args.kwargs["risk_decision"] == RiskDecision.BLOCK.value
+    assert persist_order.call_args.kwargs["status"] == "rejected"
+    assert (
+        persist_order.call_args.kwargs["metadata"]["blocked_by"]
+        == "insufficient_paper_buying_power"
+    )
+    emit_alert.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_runtime_records_market_fill_against_strategy_account(monkeypatch) -> None:
+    market = make_market()
+    intent = make_intent()
+    strategy = MagicMock()
+    strategy.evaluate.return_value = intent
+    risk_engine = MagicMock()
+    risk_engine.evaluate.return_value = make_risk_result(intent, RiskDecision.ALLOW)
+    fill_result = FillResult(
+        order_id="order-1",
+        fill_price=Decimal("0.48"),
+        fill_qty=10,
+        fee=Decimal("0.17"),
+        fill_latency_ms=200,
+        fill_type="paper",
+        status=OrderIntentStatus.FILLED,
+    )
+    paper_adapter = MagicMock()
+    paper_adapter.submit_order.return_value = fill_result
+    account = {
+        "id": "account-1",
+        "cash_balance": "100.00",
+        "reserved_cash": "0",
+    }
+    record_accounting = MagicMock(
+        side_effect=lambda **kwargs: account.update(
+            {"cash_balance": "95.03", "reserved_cash": "0"}
+        )
+    )
+    monkeypatch.setattr("worker.runtime.persist_order", MagicMock(return_value="order-1"))
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock(return_value="fill-1"))
+    monkeypatch.setattr("worker.runtime.record_paper_fill_accounting", record_accounting)
+
+    runtime = make_runtime(
+        strategy=strategy,
+        risk_engine=risk_engine,
+        paper_adapter=paper_adapter,
+        paper_account=account,
+    )
+    await runtime.on_market_update(market)
+
+    record_accounting.assert_called_once()
+    assert record_accounting.call_args.kwargs["account"]["id"] == "account-1"
+    assert record_accounting.call_args.kwargs["fill_id"] == "fill-1"
+    assert runtime._portfolio_value_usd == 95.03
+
+
+@pytest.mark.anyio
+async def test_runtime_reserves_cash_for_resting_order(monkeypatch) -> None:
+    market = make_market()
+    yes_intent = make_intent(side="yes", price=Decimal("0.46"))
+    no_intent = make_intent(side="no", price=Decimal("0.48"))
+    pair = SpreadCaptureIntent(
+        yes_intent=yes_intent,
+        no_intent=no_intent,
+        pair_id="pair-1",
+        max_resting_seconds=30,
+    )
+    strategy = MagicMock()
+    strategy.evaluate.return_value = pair
+    risk_engine = MagicMock()
+    risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
+        intent, RiskDecision.ALLOW
+    )
+    reserve = MagicMock(return_value=True)
+    monkeypatch.setattr("worker.runtime.persist_order", MagicMock(side_effect=["yes-order", "no-order"]))
+    monkeypatch.setattr("worker.runtime.reserve_paper_order_cash", reserve)
+
+    runtime = make_runtime(
+        strategy=strategy,
+        risk_engine=risk_engine,
+        paper_account={
+            "id": "account-1",
+            "cash_balance": "100.00",
+            "reserved_cash": "0",
+        },
+    )
+    await runtime.on_market_update(market)
+
+    assert reserve.call_count == 2
+    assert runtime._resting_orders.get_open_orders()[0].order_id == "yes-order"
+
+
+@pytest.mark.anyio
+async def test_runtime_releases_resting_reserve_on_cancel(monkeypatch) -> None:
+    old_market = make_market(timestamp=datetime.now(timezone.utc) - timedelta(seconds=60))
+    intent = make_intent()
+    release = MagicMock()
+    monkeypatch.setattr("worker.runtime.persist_fill", MagicMock(return_value="fill-1"))
+    monkeypatch.setattr("worker.runtime.update_resting_order_state", MagicMock())
+    monkeypatch.setattr("worker.runtime.release_paper_order_cash", release)
+
+    runtime = make_runtime(
+        paper_account={
+            "id": "account-1",
+            "cash_balance": "100.00",
+            "reserved_cash": "5.00",
+        },
+    )
+    runtime._resting_orders.add_order(
+        intent=intent,
+        max_resting_seconds=1,
+        as_of=old_market.timestamp,
+        order_id="order-1",
+    )
+    runtime.pause()
+
+    await runtime.on_market_update(make_market())
+
+    release.assert_called_once()
+    assert release.call_args.kwargs["reason"] == "cancelled"
 
 
 @pytest.mark.anyio
