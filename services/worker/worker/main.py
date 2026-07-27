@@ -110,6 +110,7 @@ async def _build_managed_runtime(
 
     runtime = TradingRuntime(
         run_id=run_id,
+        config_id=spec.config_id,
         tickers=watched_tickers,
         strategy=spec.strategy,
         risk_engine=spec.risk_engine,

@@ -12,18 +12,33 @@ from worker.execution_repository import (
     create_strategy_run,
     ensure_market_catalog_entry,
     ensure_strategy_config,
+    estimate_order_cash,
+    get_or_create_paper_account,
     load_open_positions,
+    paper_account_available_cash,
     persist_open_position,
     persist_signal,
     persist_worker_heartbeat,
+    record_paper_fill_accounting,
+    release_paper_order_cash,
+    reserve_paper_order_cash,
 )
+from core.execution.adapters import FillResult
+from core.risk.engine import OrderIntent
+from core.schemas.market import OrderIntentStatus
 from worker.storage import _get_supabase_credentials
 
 
 class FakeTable:
-    def __init__(self, response_id: str, response_data: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        response_id: str,
+        response_data: list[dict] | None = None,
+        response_sequence: list[list[dict]] | None = None,
+    ) -> None:
         self.response_id = response_id
         self.response_data = response_data
+        self.response_sequence = response_sequence or []
         self.insert_calls: list[dict] = []
         self.upsert_calls: list[tuple[dict, str | None]] = []
         self.update_calls: list[dict] = []
@@ -54,8 +69,20 @@ class FakeTable:
         self.filters.append(("gt", column, value))
         return self
 
+    def limit(self, value: int):
+        self.filters.append(("limit", "limit", value))
+        return self
+
     def execute(self):
-        return SimpleNamespace(data=self.response_data or [{"id": self.response_id}])
+        if self.response_sequence:
+            data = self.response_sequence.pop(0)
+        else:
+            data = (
+                self.response_data
+                if self.response_data is not None
+                else [{"id": self.response_id}]
+            )
+        return SimpleNamespace(data=data)
 
 
 class FakeSupabase:
@@ -217,6 +244,165 @@ def test_ensure_market_catalog_entry_is_cached(monkeypatch) -> None:
     ensure_market_catalog_entry("KXTEST")
 
     assert len(fake.tables["market_catalog"].insert_calls) == 1
+
+
+def make_intent(**kwargs) -> OrderIntent:
+    defaults = {
+        "ticker": "KXTEST",
+        "side": "yes",
+        "price": Decimal("0.40"),
+        "qty": 10,
+        "estimated_edge": 0.05,
+        "model_prob": 0.55,
+        "run_id": "run-1",
+    }
+    defaults.update(kwargs)
+    return OrderIntent(**defaults)
+
+
+def test_get_or_create_paper_account_creates_one_per_config(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["paper_accounts"] = FakeTable(
+        response_id="account-1",
+        response_sequence=[[], [{"id": "account-1"}]],
+    )
+    fake.tables["paper_ledger_entries"] = FakeTable(response_id="ledger-1")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+
+    account = get_or_create_paper_account("config-1")
+
+    assert account["id"] == "account-1"
+    assert account["config_id"] == "config-1"
+    assert account["cash_balance"] == "10000"
+    assert fake.tables["paper_accounts"].insert_calls == [
+        {
+            "config_id": "config-1",
+            "name": "default",
+            "starting_cash": "10000",
+            "cash_balance": "10000",
+            "reserved_cash": "0",
+            "status": "active",
+        }
+    ]
+    assert fake.tables["paper_ledger_entries"].insert_calls[0]["entry_type"] == "initial_deposit"
+
+
+def test_get_or_create_paper_account_reuses_existing_config_account(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["paper_accounts"] = FakeTable(
+        response_id="unused",
+        response_data=[
+            {
+                "id": "account-2",
+                "config_id": "config-2",
+                "name": "default",
+                "starting_cash": "10000",
+                "cash_balance": "9000",
+                "reserved_cash": "100",
+                "status": "active",
+            }
+        ],
+    )
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+
+    account = get_or_create_paper_account("config-2")
+
+    assert account["id"] == "account-2"
+    assert fake.tables["paper_accounts"].insert_calls == []
+    assert ("eq", "config_id", "config-2") in fake.tables["paper_accounts"].filters
+
+
+def test_reserve_and_release_paper_order_cash(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["paper_accounts"] = FakeTable(response_id="account-1")
+    fake.tables["paper_ledger_entries"] = FakeTable(response_id="ledger-1")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+    account = {
+        "id": "account-1",
+        "cash_balance": "100.00",
+        "reserved_cash": "0",
+    }
+    intent = make_intent(price=Decimal("0.40"), qty=10)
+    required = estimate_order_cash(intent)
+
+    assert reserve_paper_order_cash(
+        account=account,
+        run_id="run-1",
+        order_id="order-1",
+        intent=intent,
+    )
+    assert paper_account_available_cash(account) == Decimal("100.00") - required
+
+    released = release_paper_order_cash(
+        account=account,
+        run_id="run-1",
+        order_id="order-1",
+        intent=intent,
+    )
+
+    assert released == required
+    assert paper_account_available_cash(account) == Decimal("100.00")
+    assert [row["entry_type"] for row in fake.tables["paper_ledger_entries"].insert_calls] == [
+        "reserve",
+        "release_reserve",
+    ]
+
+
+def test_reserve_rejects_when_buying_power_is_insufficient(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["paper_accounts"] = FakeTable(response_id="account-1")
+    fake.tables["paper_ledger_entries"] = FakeTable(response_id="ledger-1")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+    account = {
+        "id": "account-1",
+        "cash_balance": "1.00",
+        "reserved_cash": "0",
+    }
+
+    assert not reserve_paper_order_cash(
+        account=account,
+        run_id="run-1",
+        order_id="order-1",
+        intent=make_intent(price=Decimal("0.40"), qty=10),
+    )
+    assert fake.tables["paper_accounts"].update_calls == []
+    assert fake.tables["paper_ledger_entries"].insert_calls == []
+
+
+def test_record_paper_fill_accounting_debits_cash_and_fees(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["paper_accounts"] = FakeTable(response_id="account-1")
+    fake.tables["paper_ledger_entries"] = FakeTable(response_id="ledger-1")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+    account = {
+        "id": "account-1",
+        "cash_balance": "100.00",
+        "reserved_cash": "0",
+    }
+    fill = FillResult(
+        order_id="order-1",
+        fill_price=Decimal("0.40"),
+        fill_qty=10,
+        fee=Decimal("0.70"),
+        fill_latency_ms=200,
+        fill_type="paper",
+        status=OrderIntentStatus.FILLED,
+    )
+
+    record_paper_fill_accounting(
+        account=account,
+        run_id="run-1",
+        order_id="order-1",
+        fill_id="fill-1",
+        intent=make_intent(price=Decimal("0.40"), qty=10),
+        fill_result=fill,
+    )
+
+    assert account["cash_balance"] == "95.30"
+    assert [row["entry_type"] for row in fake.tables["paper_ledger_entries"].insert_calls] == [
+        "fill_debit",
+        "fill_fee",
+    ]
 
 
 def test_close_position_zeroes_qty(monkeypatch) -> None:
