@@ -57,6 +57,16 @@ def make_features(**kwargs) -> FeatureVector:
     return FeatureVector(**defaults)
 
 
+def test_detect_arbitrage_uses_integer_cents_for_fee_rounding() -> None:
+    market = make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45"))
+
+    is_arbitrage, locked_profit = detect_implied_probability_arbitrage(market, qty=10)
+
+    assert is_arbitrage is True
+    # 1000c payout - 850c cost - 140c fees = 10c locked profit total -> 0.01/contract
+    assert locked_profit == Decimal("0.01")
+
+
 def test_detect_arbitrage_when_prices_sum_below_one() -> None:
     market = make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45"))
 
