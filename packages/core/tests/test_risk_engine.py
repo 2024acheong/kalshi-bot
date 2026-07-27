@@ -156,8 +156,8 @@ def test_liquidity_blocks_thin_book():
         RiskConfig(),
     )
 
-    assert result.decision == RiskDecision.BLOCK
-    assert result.reason == "order_exceeds_book_limit"
+    assert result.decision == RiskDecision.REDUCE_ONLY
+    assert result.reason == "order_exceeds_book_limit_reduced"
 
 
 def test_liquidity_allows_normal():

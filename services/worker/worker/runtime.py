@@ -4,6 +4,8 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from dataclasses import replace
+
 from core.execution.adapters import FillResult, PaperAdapter
 from core.execution.resting_orders import RestingOrder, RestingOrderBook
 from core.features.compute import compute_features
@@ -672,6 +674,9 @@ class TradingRuntime:
             )
             return
 
+        if result.decision == RiskDecision.REDUCE_ONLY:
+            # construct a reduced-qty version of the intent before submitting
+            intent = replace(intent, qty=result.approved_qty)
         fill_result = self.paper_adapter.submit_order(
             order_id=order_id,
             intent=intent,

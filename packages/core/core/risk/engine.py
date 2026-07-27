@@ -47,6 +47,7 @@ class RiskConfig:
     # Liquidity
     max_spread_pct: float = 15.0
     min_liquidity_score: float = 5.0
+    min_book_size: int= 3
     max_order_pct_of_book: float = 0.25
 
     # Correlation
@@ -138,18 +139,25 @@ def check_liquidity(
             metadata=metadata,
         )
 
-    if (
-        features.liquidity_score is not None
-        and features.liquidity_score < config.min_liquidity_score
-    ):
+    # Use book_size directly (the side being traded) instead of the symmetric
+    # liquidity_score, which is dominated by whichever side is thinner even if
+    # it's the side we're NOT trading against.
+    if book_size is not None and book_size < config.min_book_size:
         return RiskGateResult(
             gate="liquidity",
             decision=RiskDecision.BLOCK,
-            reason="liquidity_score_too_low",
+            reason="book_size_too_low",
             metadata=metadata,
         )
 
     if book_size is not None and intent.qty > book_size * config.max_order_pct_of_book:
+        if max_order_qty is not None and max_order_qty > 0:
+            return RiskGateResult(
+                gate="liquidity",
+                decision=RiskDecision.REDUCE_ONLY,
+                reason="order_exceeds_book_limit_reduced",
+                metadata={**metadata, "approved_qty": max_order_qty},
+            )
         return RiskGateResult(
             gate="liquidity",
             decision=RiskDecision.BLOCK,
