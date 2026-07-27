@@ -20,6 +20,7 @@ from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionS
 from core.strategies.spread_capture import SpreadCaptureIntent
 from research import data_loader
 from research.metrics import BacktestMetrics, compute_metrics
+from dataclasses import replace
 
 
 @dataclass
@@ -203,6 +204,9 @@ class Backtester:
                     )
                     continue
 
+                if risk_result.decision == RiskDecision.REDUCE_ONLY:
+                    # construct a reduced-qty version of the intent before submitting
+                    intent = replace(intent, qty=result.approved_qty)
                 fill_result = self.paper_adapter.submit_order(
                     order_id=f"backtest-order-{index:08d}-{leg_index}",
                     intent=order_intent,
