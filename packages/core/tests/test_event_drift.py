@@ -83,6 +83,31 @@ def test_no_entry_when_imbalance_does_not_confirm() -> None:
     assert intent is None
 
 
+def test_entry_on_volume_surge_overrides_weak_imbalance() -> None:
+    intent = EventDriftStrategy().evaluate_entry(
+        make_market(),
+        make_features(
+            price_momentum_1h=0.05,
+            bid_ask_imbalance=0.05,
+            volume_zscore=3.5,
+        ),
+        run_id="run-1",
+    )
+
+    assert intent is not None
+    assert intent.side == "yes"
+
+
+def test_no_entry_when_relative_momentum_below_threshold() -> None:
+    intent = EventDriftStrategy(momentum_threshold=0.10).evaluate_entry(
+        make_market(),
+        make_features(price_momentum_1h=0.03, bid_ask_imbalance=0.3, volume_zscore=2.0),
+        run_id="run-1",
+    )
+
+    assert intent is None
+
+
 def test_no_entry_on_low_volume() -> None:
     intent = EventDriftStrategy().evaluate_entry(
         make_market(),
