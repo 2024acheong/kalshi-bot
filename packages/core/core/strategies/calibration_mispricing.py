@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+import math
+from enum import Enum
+
 from core.risk.engine import OrderIntent
 from core.schemas.market import FeatureVector, MarketState
 
@@ -50,26 +53,71 @@ class NaiveMidpointDriftEstimator(ProbabilityEstimator):
         estimate = mid + (momentum * self.momentum_weight)
         return min(max(estimate, 0.01), 0.99)
 
+class ProperScoringRule(Enum):
+    BRIER = "brier"          # Quadratic / Linear margin
+    LOGARITHMIC = "log"      # Log-odds / LMSR (Recommended for calibrated models)
+    SPHERICAL = "spherical"  # Spherical scoring rule
 
-def compute_brier_linear_size(
+# def compute_brier_linear_size(
+#     model_prob: float,
+#     market_price: float,
+#     max_qty: int,
+#     scale_factor: float = 1.0,
+# ) -> int:
+#     """
+#     Position size proportional to the forecast-market margin.
+
+#     For the Brier/quadratic scoring rule, proper bet size scales linearly with
+#     the margin rather than Kelly-sizing as if the forecast were ground truth.
+#     """
+#     if max_qty <= 0:
+#         return 0
+#     if scale_factor <= 0:
+#         raise ValueError("scale_factor must be positive")
+
+#     margin = abs(model_prob - market_price)
+#     qty = round(min(margin * max_qty / scale_factor, max_qty))
+#     return max(qty, 0)
+def compute_proper_betting_size(
     model_prob: float,
     market_price: float,
     max_qty: int,
+    scoring_rule: ProperScoringRule = ProperScoringRule.LOGARITHMIC,
     scale_factor: float = 1.0,
 ) -> int:
     """
-    Position size proportional to the forecast-market margin.
-
-    For the Brier/quadratic scoring rule, proper bet size scales linearly with
-    the margin rather than Kelly-sizing as if the forecast were ground truth.
+    Computes position size s(p, q) = grad(G)(p) - grad(G)(q) based on 
+    Gu et al. (2026) "When do prophets profit in prediction markets?"
     """
     if max_qty <= 0:
         return 0
     if scale_factor <= 0:
         raise ValueError("scale_factor must be positive")
 
-    margin = abs(model_prob - market_price)
-    qty = round(min(margin * max_qty / scale_factor, max_qty))
+    # Clamp probabilities to avoid numerical overflow/undef in logit
+    p = max(min(model_prob, 0.999), 0.001)
+    q = max(min(market_price, 0.999), 0.001)
+
+    if scoring_rule == ProperScoringRule.BRIER:
+        # G(p) = p^2 -> grad(G)(p) = 2p
+        raw_size = (p - q)
+
+    elif scoring_rule == ProperScoringRule.LOGARITHMIC:
+        # G(p) = p*ln(p) + (1-p)*ln(1-p) -> grad(G)(p) = logit(p)
+        logit_p = math.log(p / (1.0 - p))
+        logit_q = math.log(q / (1.0 - q))
+        raw_size = logit_p - logit_q
+
+    elif scoring_rule == ProperScoringRule.SPHERICAL:
+        # G(p) = sqrt(p^2 + (1-p)^2)
+        norm_p = math.sqrt(p**2 + (1.0 - p)**2)
+        norm_q = math.sqrt(q**2 + (1.0 - q)**2)
+        raw_size = (p / norm_p) - (q / norm_q)
+
+    # Scale and clamp to max_qty
+    abs_qty = abs(raw_size) * (max_qty / scale_factor)
+    qty = round(min(abs_qty, float(max_qty)))
+
     return max(qty, 0)
 
 
@@ -149,112 +197,52 @@ class CalibrationMispricingStrategy:
         run_id: str,
     ) -> OrderIntent | None:
         model_prob = self.estimator.estimate(market, features)
-        if model_prob is None:
-            self._log_hold(market, "model_prob_none")
+        if model_prob is None or market.yes_ask is None or market.yes_bid is None:
             return None
 
-        if market.yes_bid is None or market.yes_ask is None:
-            self._log_hold(
-                market,
-                "missing_book",
+        ask_price = float(market.yes_ask)
+        bid_price = float(market.yes_bid)
+
+        # 1. Edge exceeds ask -> Buy YES
+        if model_prob > ask_price:
+            qty = compute_proper_betting_size(
                 model_prob=model_prob,
-                yes_bid=str(market.yes_bid) if market.yes_bid is not None else None,
-                yes_ask=str(market.yes_ask) if market.yes_ask is not None else None,
+                market_price=ask_price,
+                max_qty=self.max_qty,
+                scoring_rule=ProperScoringRule.LOGARITHMIC,  # Uses log-odds scaling
+                scale_factor=self.scale_factor,
             )
-            return None
-
-        if (
-            features.time_to_close_hours is None
-            or features.time_to_close_hours < self.min_hours_to_close
-        ):
-            self._log_hold(
-                market,
-                "insufficient_time_to_close",
-                model_prob=model_prob,
-                time_to_close_hours=features.time_to_close_hours,
-                min_hours_to_close=self.min_hours_to_close,
-            )
-            return None
-
-        if is_within_no_bet_zone(model_prob, market.yes_bid, market.yes_ask):
-            self._log_hold(
-                market,
-                "inside_spread",
-                model_prob=model_prob,
-                yes_bid=str(market.yes_bid),
-                yes_ask=str(market.yes_ask),
-            )
-            return None
-
-        if model_prob > float(market.yes_ask):
-            price = market.yes_ask
-            edge = model_prob - float(price)
-            qty = compute_brier_linear_size(
-                model_prob,
-                float(price),
-                self.max_qty,
-                self.scale_factor,
-            )
-            if qty <= 0:
-                self._log_hold(
-                    market,
-                    "qty_zero",
+            if qty > 0:
+                return OrderIntent(
+                    ticker=market.ticker,
                     side="yes",
+                    price=market.yes_ask,
+                    qty=qty,
+                    estimated_edge=model_prob - ask_price,
                     model_prob=model_prob,
-                    price=str(price),
-                    edge=edge,
-                    max_qty=self.max_qty,
-                    scale_factor=self.scale_factor,
+                    run_id=run_id,
                 )
-                return None
-            return OrderIntent(
-                ticker=market.ticker,
-                side="yes",
-                price=price,
-                qty=qty,
-                estimated_edge=edge,
-                model_prob=model_prob,
-                run_id=run_id,
-            )
 
-        if model_prob < float(market.yes_bid):
-            price = market.yes_bid
-            edge = float(price) - model_prob
-            qty = compute_brier_linear_size(
-                model_prob,
-                float(price),
-                self.max_qty,
-                self.scale_factor,
+        # 2. Edge falls below bid -> Buy NO
+        elif model_prob < bid_price:
+            qty = compute_proper_betting_size(
+                model_prob=model_prob,
+                market_price=bid_price,
+                max_qty=self.max_qty,
+                scoring_rule=ProperScoringRule.LOGARITHMIC,
+                scale_factor=self.scale_factor,
             )
-            if qty <= 0:
-                self._log_hold(
-                    market,
-                    "qty_zero",
+            if qty > 0:
+                return OrderIntent(
+                    ticker=market.ticker,
                     side="no",
+                    price=market.yes_bid,
+                    qty=qty,
+                    estimated_edge=bid_price - model_prob,
                     model_prob=model_prob,
-                    price=str(price),
-                    edge=edge,
-                    max_qty=self.max_qty,
-                    scale_factor=self.scale_factor,
+                    run_id=run_id,
                 )
-                return None
-            return OrderIntent(
-                ticker=market.ticker,
-                side="no",
-                price=price,
-                qty=qty,
-                estimated_edge=edge,
-                model_prob=model_prob,
-                run_id=run_id,
-            )
 
-        self._log_hold(
-            market,
-            "no_direction",
-            model_prob=model_prob,
-            yes_bid=str(market.yes_bid),
-            yes_ask=str(market.yes_ask),
-        )
         return None
 
     def evaluate_exit(
