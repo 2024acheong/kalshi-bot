@@ -637,7 +637,7 @@ class TradingRuntime:
             blocked_by = PAPER_BUYING_POWER_BLOCK
             decision = RiskDecision.BLOCK
 
-        order_status = "approved" if decision == RiskDecision.ALLOW else "rejected"
+        order_status = "approved" if decision == RiskDecision.ALLOW or decision == RiskDecision.REDUCE_ONLY else "rejected"
         signal_id = self._persist_signal_for_intent(intent, market, features, "market")
         order_id = persist_order(
             run_id=intent.run_id,
