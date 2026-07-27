@@ -4,6 +4,8 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from dataclasses import replace
+
 from core.execution.adapters import FillResult, PaperAdapter
 from core.execution.resting_orders import RestingOrder, RestingOrderBook
 from core.features.compute import compute_features
@@ -17,13 +19,21 @@ from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent, SpreadCaptureStrategy
 from worker.execution_repository import (
+    PAPER_BUYING_POWER_BLOCK,
     close_position,
+    credit_paper_realized_value,
+    estimate_order_cash,
+    get_or_create_paper_account,
     load_open_positions,
     persist_fill,
     persist_open_position,
     persist_order,
     persist_signal,
+    record_paper_fill_accounting,
+    release_paper_order_cash,
+    reserve_paper_order_cash,
     resting_order_metadata,
+    update_order_metadata,
     update_order_status,
     update_resting_order_state,
 )
@@ -45,8 +55,11 @@ class TradingRuntime:
         paper_adapter: PaperAdapter,
         history_window: int = 20,
         default_max_resting_seconds: int = 30,
+        config_id: str | None = None,
+        paper_account: dict | None = None,
     ):
         self.run_id = run_id
+        self.config_id = config_id
         self.tickers = tickers
         self.strategy = strategy
         self.risk_engine = risk_engine
@@ -59,12 +72,35 @@ class TradingRuntime:
         self._running = False
         self._paused = False
 
-        # Fake portfolio state for now - real state comes from positions table later.
+        self._paper_account = (
+            paper_account
+            if paper_account is not None
+            else get_or_create_paper_account(config_id)
+            if config_id is not None
+            else None
+        )
+
         self._portfolio_value_usd = 1000.0
         self._current_exposure_usd = 0.0
         self._daily_realized_pnl_usd = 0.0
+        self._refresh_paper_portfolio_state()
         self._kill_switch_active = False
         self._global_kill_switch = False
+
+    def _refresh_paper_portfolio_state(self) -> None:
+        if self._paper_account is None:
+            return
+        cash_balance = float(Decimal(str(self._paper_account.get("cash_balance", "0"))))
+        reserved_cash = float(Decimal(str(self._paper_account.get("reserved_cash", "0"))))
+        self._portfolio_value_usd = cash_balance
+        self._current_exposure_usd = reserved_cash
+
+    def _paper_account_has_cash(self, intent: OrderIntent) -> bool:
+        if self._paper_account is None:
+            return True
+        cash_balance = Decimal(str(self._paper_account.get("cash_balance", "0")))
+        reserved_cash = Decimal(str(self._paper_account.get("reserved_cash", "0")))
+        return cash_balance - reserved_cash >= estimate_order_cash(intent)
 
     def restore_resting_orders(self, orders: list[RestingOrder]) -> None:
         for order in orders:
@@ -363,6 +399,25 @@ class TradingRuntime:
     ) -> None:
         yes_fill = await self._process_intent(pair.yes_intent, market, features)
         no_fill = await self._process_intent(pair.no_intent, market, features)
+        if (
+            self._paper_account is not None
+            and yes_fill is not None
+            and no_fill is not None
+            and yes_fill.fill_qty > 0
+            and no_fill.fill_qty > 0
+        ):
+            locked_qty = min(yes_fill.fill_qty, no_fill.fill_qty)
+            credit_paper_realized_value(
+                account=self._paper_account,
+                run_id=self.run_id,
+                order_id=yes_fill.order_id,
+                fill_id=None,
+                ticker=pair.yes_intent.ticker,
+                side="yes_no_pair",
+                qty=locked_qty,
+                reason="spread_capture_hedged_pair",
+            )
+            self._refresh_paper_portfolio_state()
         logger.info(
             "Immediate spread capture pair %s processed: yes_fill=%s no_fill=%s",
             pair.pair_id,
@@ -391,9 +446,15 @@ class TradingRuntime:
             kill_switch_active=self._kill_switch_active,
             global_kill_switch=self._global_kill_switch,
         )
+        blocked_by = result.blocked_by
+        decision = result.decision
+        if decision == RiskDecision.ALLOW and not self._paper_account_has_cash(intent):
+            blocked_by = PAPER_BUYING_POWER_BLOCK
+            decision = RiskDecision.BLOCK
+
         order_status = (
             OrderIntentStatus.SUBMITTED.value
-            if result.decision == RiskDecision.ALLOW
+            if decision == RiskDecision.ALLOW
             else "rejected"
         )
         signal_id = self._persist_signal_for_intent(intent, market, features, "resting_limit")
@@ -404,11 +465,11 @@ class TradingRuntime:
             side=intent.side,
             price=intent.price,
             qty=intent.qty,
-            risk_decision=result.decision.value,
+            risk_decision=decision.value,
             status=order_status,
             signal_id=signal_id,
             metadata={
-                "blocked_by": result.blocked_by,
+                "blocked_by": blocked_by,
                 "gates": [gate.gate for gate in result.gate_results],
                 "estimated_edge": intent.estimated_edge,
                 "model_prob": intent.model_prob,
@@ -422,23 +483,58 @@ class TradingRuntime:
             },
         )
 
-        if result.decision != RiskDecision.ALLOW:
+        if decision != RiskDecision.ALLOW:
             logger.info(
                 "Resting order blocked ticker=%s decision=%s blocked_by=%s",
                 intent.ticker,
-                result.decision.value,
-                result.blocked_by,
+                decision.value,
+                blocked_by,
             )
             emit_alert(
                 "order_blocked",
                 {
                     "order_id": order_id,
                     "ticker": intent.ticker,
-                    "decision": result.decision.value,
-                    "blocked_by": result.blocked_by,
+                    "decision": decision.value,
+                    "blocked_by": blocked_by,
                 },
             )
             return None
+
+        if self._paper_account is not None and not reserve_paper_order_cash(
+            account=self._paper_account,
+            run_id=self.run_id,
+            order_id=order_id,
+            intent=intent,
+        ):
+            update_order_metadata(
+                order_id,
+                status="rejected",
+                metadata={
+                    "blocked_by": PAPER_BUYING_POWER_BLOCK,
+                    "gates": [gate.gate for gate in result.gate_results],
+                    "estimated_edge": intent.estimated_edge,
+                    "model_prob": intent.model_prob,
+                    **resting_order_metadata(
+                        pair_id=pair_id,
+                        max_resting_seconds=max_resting_seconds,
+                        created_at=as_of,
+                        accumulated_fill_qty=0,
+                        total_qty=intent.qty,
+                    ),
+                },
+            )
+            emit_alert(
+                "order_blocked",
+                {
+                    "order_id": order_id,
+                    "ticker": intent.ticker,
+                    "decision": RiskDecision.BLOCK.value,
+                    "blocked_by": PAPER_BUYING_POWER_BLOCK,
+                },
+            )
+            return None
+        self._refresh_paper_portfolio_state()
 
         return self._resting_orders.add_order(
             intent=intent,
@@ -453,12 +549,46 @@ class TradingRuntime:
         events: list[tuple[RestingOrder, FillResult]],
     ) -> None:
         for order, fill_result in events:
-            persist_fill(order.order_id, fill_result)
+            fill_id = persist_fill(order.order_id, fill_result)
             update_resting_order_state(order)
             if fill_result.fill_qty > 0:
-                self._current_exposure_usd += fill_result.fill_qty * float(
-                    fill_result.fill_price
-                )
+                if self._paper_account is not None:
+                    record_paper_fill_accounting(
+                        account=self._paper_account,
+                        run_id=self.run_id,
+                        order_id=order.order_id,
+                        fill_id=fill_id,
+                        intent=order.intent,
+                        fill_result=fill_result,
+                        release_reserved_qty=fill_result.fill_qty,
+                    )
+                    if order.intent.is_closing_order:
+                        credit_paper_realized_value(
+                            account=self._paper_account,
+                            run_id=self.run_id,
+                            order_id=order.order_id,
+                            fill_id=fill_id,
+                            ticker=order.intent.ticker,
+                            side=order.intent.side,
+                            qty=fill_result.fill_qty,
+                            reason="closing_order",
+                        )
+                    self._refresh_paper_portfolio_state()
+                else:
+                    self._current_exposure_usd += fill_result.fill_qty * float(
+                        fill_result.fill_price
+                    )
+            elif fill_result.status == OrderIntentStatus.CANCELLED:
+                if self._paper_account is not None:
+                    release_paper_order_cash(
+                        account=self._paper_account,
+                        run_id=self.run_id,
+                        order_id=order.order_id,
+                        intent=order.intent,
+                        qty=order.remaining_qty,
+                        reason="cancelled",
+                    )
+                    self._refresh_paper_portfolio_state()
 
             if order.pair_id and fill_result.status == OrderIntentStatus.FILLED:
                 for cancelled_order in self._resting_orders.cancel_pair(order.pair_id):
@@ -467,6 +597,16 @@ class TradingRuntime:
                         OrderIntentStatus.CANCELLED.value,
                     )
                     update_resting_order_state(cancelled_order)
+                    if self._paper_account is not None:
+                        release_paper_order_cash(
+                            account=self._paper_account,
+                            run_id=self.run_id,
+                            order_id=cancelled_order.order_id,
+                            intent=cancelled_order.intent,
+                            qty=cancelled_order.remaining_qty,
+                            reason="sibling_cancelled",
+                        )
+                        self._refresh_paper_portfolio_state()
                     logger.info(
                         "Cancelled spread capture sibling order=%s pair_id=%s",
                         cancelled_order.order_id,
@@ -491,7 +631,13 @@ class TradingRuntime:
             kill_switch_active=self._kill_switch_active,
             global_kill_switch=self._global_kill_switch,
         )
-        order_status = "approved" if result.decision == RiskDecision.ALLOW else "rejected"
+        blocked_by = result.blocked_by
+        decision = result.decision
+        if decision == RiskDecision.ALLOW and not self._paper_account_has_cash(intent):
+            blocked_by = PAPER_BUYING_POWER_BLOCK
+            decision = RiskDecision.BLOCK
+
+        order_status = "approved" if decision == RiskDecision.ALLOW else "rejected"
         signal_id = self._persist_signal_for_intent(intent, market, features, "market")
         order_id = persist_order(
             run_id=intent.run_id,
@@ -500,44 +646,71 @@ class TradingRuntime:
             side=intent.side,
             price=intent.price,
             qty=intent.qty,
-            risk_decision=result.decision.value,
+            risk_decision=decision.value,
             status=order_status,
             signal_id=signal_id,
             metadata={
-                "blocked_by": result.blocked_by,
+                "blocked_by": blocked_by,
                 "gates": [gate.gate for gate in result.gate_results],
                 "order_type": "market",
             },
         )
 
-        if result.decision != RiskDecision.ALLOW:
+        if decision != RiskDecision.ALLOW:
             logger.info(
                 "Order blocked ticker=%s decision=%s blocked_by=%s",
                 intent.ticker,
-                result.decision.value,
-                result.blocked_by,
+                decision.value,
+                blocked_by,
             )
             emit_alert(
                 "order_blocked",
                 {
                     "order_id": order_id,
                     "ticker": intent.ticker,
-                    "decision": result.decision.value,
-                    "blocked_by": result.blocked_by,
+                    "decision": decision.value,
+                    "blocked_by": blocked_by,
                 },
             )
             return
 
+        if result.decision == RiskDecision.REDUCE_ONLY:
+            # construct a reduced-qty version of the intent before submitting
+            intent = replace(intent, qty=result.approved_qty)
         fill_result = self.paper_adapter.submit_order(
             order_id=order_id,
             intent=intent,
             order_type="market",
             market=market,
         )
-        persist_fill(order_id, fill_result)
+        fill_id = persist_fill(order_id, fill_result)
 
         if fill_result.fill_qty > 0:
-            self._current_exposure_usd += fill_result.fill_qty * float(fill_result.fill_price)
+            if self._paper_account is not None:
+                record_paper_fill_accounting(
+                    account=self._paper_account,
+                    run_id=self.run_id,
+                    order_id=order_id,
+                    fill_id=fill_id,
+                    intent=intent,
+                    fill_result=fill_result,
+                )
+                if intent.is_closing_order:
+                    credit_paper_realized_value(
+                        account=self._paper_account,
+                        run_id=self.run_id,
+                        order_id=order_id,
+                        fill_id=fill_id,
+                        ticker=intent.ticker,
+                        side=intent.side,
+                        qty=fill_result.fill_qty,
+                        reason="closing_order",
+                    )
+                self._refresh_paper_portfolio_state()
+            else:
+                self._current_exposure_usd += fill_result.fill_qty * float(
+                    fill_result.fill_price
+                )
         if fill_result.status == OrderIntentStatus.PARTIALLY_FILLED:
             self._rest_partially_filled_order(
                 order_id=order_id,
@@ -548,7 +721,7 @@ class TradingRuntime:
         logger.info(
             "Order processed ticker=%s decision=%s fill_status=%s fill_qty=%s fill_price=%s",
             intent.ticker,
-            result.decision.value,
+            decision.value,
             fill_result.status.value,
             fill_result.fill_qty,
             fill_result.fill_price,
@@ -564,6 +737,7 @@ class TradingRuntime:
     ) -> None:
         if filled_qty >= intent.qty:
             return
+        remaining_qty = intent.qty - filled_qty
         order = RestingOrder(
             order_id=order_id,
             intent=intent,
@@ -574,6 +748,25 @@ class TradingRuntime:
             status=OrderIntentStatus.PARTIALLY_FILLED,
             accumulated_fill_qty=filled_qty,
         )
+        if self._paper_account is not None and not reserve_paper_order_cash(
+            account=self._paper_account,
+            run_id=self.run_id,
+            order_id=order_id,
+            intent=OrderIntent(
+                ticker=intent.ticker,
+                side=intent.side,
+                price=intent.price,
+                qty=remaining_qty,
+                estimated_edge=intent.estimated_edge,
+                model_prob=intent.model_prob,
+                run_id=intent.run_id,
+                signal_id=intent.signal_id,
+                is_closing_order=intent.is_closing_order,
+            ),
+        ):
+            update_order_status(order_id, OrderIntentStatus.CANCELLED.value)
+            return
+        self._refresh_paper_portfolio_state()
         self._resting_orders.restore_order(order)
         update_resting_order_state(order)
 
