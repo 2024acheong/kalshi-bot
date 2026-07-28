@@ -197,9 +197,37 @@ class CalibrationMispricingStrategy:
         run_id: str,
     ) -> OrderIntent | None:
         model_prob = self.estimator.estimate(market, features)
-        if model_prob is None or market.yes_ask is None or market.yes_bid is None:
+        if model_prob is None:
+            self._log_hold(market, "model_prob_none")
             return None
 
+        if market.yes_bid is None or market.yes_ask is None:
+            self._log_hold(market, "missing_book", model_prob=model_prob)
+            return None
+
+        if (
+            features.time_to_close_hours is None
+            or features.time_to_close_hours < self.min_hours_to_close
+        ):
+            self._log_hold(
+                market,
+                "insufficient_time_to_close",
+                model_prob=model_prob,
+                time_to_close_hours=features.time_to_close_hours,
+                min_hours_to_close=self.min_hours_to_close,
+            )
+            return None
+
+        if is_within_no_bet_zone(model_prob, market.yes_bid, market.yes_ask):
+            self._log_hold(
+                market,
+                "inside_spread",
+                model_prob=model_prob,
+                yes_bid=str(market.yes_bid),
+                yes_ask=str(market.yes_ask),
+            )
+            return None
+        
         ask_price = float(market.yes_ask)
         bid_price = float(market.yes_bid)
 

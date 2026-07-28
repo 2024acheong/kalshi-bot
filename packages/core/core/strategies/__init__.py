@@ -3,7 +3,8 @@ from core.strategies.calibration_mispricing import (
     CalibrationMispricingStrategy,
     NaiveMidpointDriftEstimator,
     ProbabilityEstimator,
-    compute_brier_linear_size,
+    ProperScoringRule,
+    compute_proper_betting_size,
     is_within_no_bet_zone,
 )
 from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
@@ -19,8 +20,9 @@ __all__ = [
     "MeanReversionStrategy",
     "NaiveMidpointDriftEstimator",
     "ProbabilityEstimator",
+    "ProperScoringRule",
     "SpreadCaptureIntent",
     "SpreadCaptureStrategy",
-    "compute_brier_linear_size",
+    "compute_proper_betting_size",
     "is_within_no_bet_zone",
 ]
