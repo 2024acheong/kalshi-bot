@@ -476,7 +476,7 @@ class TradingRuntime:
 
         order_status = (
             OrderIntentStatus.SUBMITTED.value
-            if decision == RiskDecision.ALLOW
+            if decision != RiskDecision.BLOCK
             else "rejected"
         )
         signal_id = self._persist_signal_for_intent(intent, market, features, "resting_limit")
@@ -505,7 +505,7 @@ class TradingRuntime:
             },
         )
 
-        if decision != RiskDecision.ALLOW:
+        if decision == RiskDecision.BLOCK:
             logger.info(
                 "Resting order blocked ticker=%s decision=%s blocked_by=%s",
                 intent.ticker,
@@ -678,7 +678,7 @@ class TradingRuntime:
             },
         )
 
-        if decision != RiskDecision.ALLOW:
+        if decision == RiskDecision.BLOCK:
             logger.info(
                 "Order blocked ticker=%s decision=%s blocked_by=%s",
                 intent.ticker,
