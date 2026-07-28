@@ -24,16 +24,19 @@ class EventDriftPosition:
 class EventDriftStrategy:
     def __init__(
         self,
-        momentum_threshold: float = 0.03,
+        momentum_threshold: float = 0.06,
         min_confirming_imbalance: float = 0.15,
         min_volume_zscore: float = 1.5,
+        volume_surge_zscore: float = 3.0,
         qty: int = 10,
         exhaustion_threshold_pct: float = 0.5,
         min_hours_to_close: float = 0.5,
     ):
+        # momentum_threshold is a relative move (e.g. 0.06 = 6% of reference price).
         self.momentum_threshold = momentum_threshold
         self.min_confirming_imbalance = min_confirming_imbalance
         self.min_volume_zscore = min_volume_zscore
+        self.volume_surge_zscore = volume_surge_zscore
         self.qty = qty
         self.exhaustion_threshold_pct = exhaustion_threshold_pct
         self.min_hours_to_close = min_hours_to_close
@@ -56,18 +59,31 @@ class EventDriftStrategy:
         Follow confirmed momentum when book pressure and volume support the move.
         """
         momentum = features.price_momentum_1h
-        if momentum is None or abs(momentum) < self.momentum_threshold:
+        if momentum is None:
+            return None
+
+        reference_price = features.mid_price
+        if reference_price is None or reference_price <= 0:
+            return None
+
+        relative_momentum = abs(momentum) / reference_price
+        if relative_momentum < self.momentum_threshold:
             return None
 
         imbalance = features.bid_ask_imbalance
         if imbalance is None:
             return None
 
-        if momentum > 0 and imbalance < self.min_confirming_imbalance:
-            return None
+        volume_surge = (
+            features.volume_zscore is not None
+            and features.volume_zscore >= self.volume_surge_zscore
+        )
+        if not volume_surge:
+            if momentum > 0 and imbalance < self.min_confirming_imbalance:
+                return None
 
-        if momentum < 0 and imbalance > -self.min_confirming_imbalance:
-            return None
+            if momentum < 0 and imbalance > -self.min_confirming_imbalance:
+                return None
 
         # Unlike mean reversion, event drift wants elevated volume as evidence
         # that the move is informed activity rather than noise.

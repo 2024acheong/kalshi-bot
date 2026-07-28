@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from core.features.compute import compute_mid_price
 from core.risk.engine import OrderIntent
 from core.schemas.market import FeatureVector, MarketState
 
@@ -78,6 +77,7 @@ class MeanReversionStrategy:
         if features.volume_zscore is None or abs(features.volume_zscore) >= self.max_volume_zscore:
             return None
 
+        # Skip markets too close to resolution; late moves are convergence, not noise.
         if (
             features.time_to_close_hours is None
             or features.time_to_close_hours < self.min_hours_to_close
@@ -124,24 +124,25 @@ class MeanReversionStrategy:
         if market.yes_bid is None or market.yes_ask is None:
             return None
 
-        mid_price = compute_mid_price(market)
-        if mid_price is None:
-            return None
-
-        current_mid = Decimal(str(mid_price))
         stop_band = position.entry_spread_ticks * Decimal(str(self.stop_loss_spread_multiple))
         should_exit = False
 
+        # Evaluate exits against executable prices, not mid, so wide spreads cannot
+        # mask the true cost of closing (e.g. buying YES at ask to exit a NO leg).
         if position.side == "no":
-            should_exit = (
-                current_mid <= position.entry_mid_price
-                or current_mid >= position.entry_mid_price + stop_band
-            )
+            exit_price = market.yes_ask
+            if exit_price is not None:
+                should_exit = (
+                    exit_price <= position.entry_mid_price
+                    or exit_price >= position.entry_mid_price + stop_band
+                )
         elif position.side == "yes":
-            should_exit = (
-                current_mid >= position.entry_mid_price
-                or current_mid <= position.entry_mid_price - stop_band
-            )
+            exit_price = market.yes_bid
+            if exit_price is not None:
+                should_exit = (
+                    exit_price >= position.entry_mid_price
+                    or exit_price <= position.entry_mid_price - stop_band
+                )
 
         if not should_exit:
             return None

@@ -12,7 +12,8 @@ from core.strategies.calibration_mispricing import (
     CalibrationMispricingStrategy,
     NaiveMidpointDriftEstimator,
     ProbabilityEstimator,
-    compute_brier_linear_size,
+    ProperScoringRule,
+    compute_proper_betting_size,
     is_within_no_bet_zone,
 )
 
@@ -108,19 +109,45 @@ def test_naive_estimator_clips_to_valid_range() -> None:
     ) == 0.01
 
 
-def test_brier_linear_size_scales_with_margin() -> None:
-    small = compute_brier_linear_size(0.50, 0.45, max_qty=20)
-    large = compute_brier_linear_size(0.70, 0.45, max_qty=20)
+def test_proper_betting_logarithmic_scaling() -> None:
+    # Near mid-market (0.50 -> 0.55): logit diff is small (~0.20)
+    mid_qty = compute_proper_betting_size(
+        0.55, 0.50, max_qty=20, scoring_rule=ProperScoringRule.LOGARITHMIC, scale_factor=1.0
+    )
+    # Near tail (0.05 -> 0.10): logit diff is much larger (~0.75) for same 0.05 margin
+    tail_qty = compute_proper_betting_size(
+        0.10, 0.05, max_qty=20, scoring_rule=ProperScoringRule.LOGARITHMIC, scale_factor=1.0
+    )
 
-    assert small < large
+    # Log-odds proper betting bets larger on tail mispricings with equal probability gap
+    assert tail_qty > mid_qty
 
 
-def test_brier_linear_size_zero_margin_returns_zero() -> None:
-    assert compute_brier_linear_size(0.45, 0.45, max_qty=20) == 0
+def test_proper_betting_zero_margin_returns_zero() -> None:
+    qty = compute_proper_betting_size(
+        0.45, 0.45, max_qty=20, scoring_rule=ProperScoringRule.LOGARITHMIC
+    )
+    assert qty == 0
 
 
-def test_brier_linear_size_never_negative() -> None:
-    assert compute_brier_linear_size(0.10, 0.90, max_qty=20) >= 0
+def test_proper_betting_clamping_max_qty() -> None:
+    # Huge edge should be capped at max_qty
+    qty = compute_proper_betting_size(
+        0.99, 0.01, max_qty=20, scoring_rule=ProperScoringRule.LOGARITHMIC, scale_factor=1.0
+    )
+    assert qty == 20
+
+
+def test_proper_betting_spherical_and_brier_modes() -> None:
+    brier_qty = compute_proper_betting_size(
+        0.60, 0.45, max_qty=20, scoring_rule=ProperScoringRule.BRIER, scale_factor=1.0
+    )
+    spherical_qty = compute_proper_betting_size(
+        0.60, 0.45, max_qty=20, scoring_rule=ProperScoringRule.SPHERICAL, scale_factor=1.0
+    )
+
+    assert brier_qty > 0
+    assert spherical_qty > 0
 
 
 def test_no_bet_zone_true_within_spread() -> None:
@@ -144,7 +171,7 @@ def test_entry_buys_yes_when_prob_above_ask() -> None:
     assert intent is not None
     assert intent.side == "yes"
     assert intent.price == Decimal("0.45")
-    assert intent.qty == 3
+    assert intent.qty == 12
     assert intent.estimated_edge == pytest.approx(0.15)
     assert intent.model_prob == 0.60
 
@@ -158,7 +185,7 @@ def test_entry_buys_no_when_prob_below_bid() -> None:
     assert intent is not None
     assert intent.side == "no"
     assert intent.price == Decimal("0.40")
-    assert intent.qty == 3
+    assert intent.qty == 14
     assert intent.estimated_edge == pytest.approx(0.15)
     assert intent.model_prob == 0.25
 

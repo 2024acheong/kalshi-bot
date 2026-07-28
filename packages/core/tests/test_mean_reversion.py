@@ -164,6 +164,32 @@ def test_no_exit_when_neither_condition_met() -> None:
     assert intent is None
 
 
+def test_no_exit_when_mid_reverts_but_executable_price_does_not() -> None:
+    """Wide spreads can show favorable mid while exit cost remains expensive."""
+    intent = MeanReversionStrategy().evaluate_exit(
+        make_position(side="no", entry_mid_price=Decimal("0.45")),
+        make_market(yes_bid=Decimal("0.38"), yes_ask=Decimal("0.48")),
+        as_of=BASE_TIME + timedelta(minutes=5),
+    )
+
+    assert intent is None
+
+
+def test_exit_on_stop_loss_when_executable_price_spikes() -> None:
+    intent = MeanReversionStrategy().evaluate_exit(
+        make_position(
+            side="no",
+            entry_mid_price=Decimal("0.45"),
+            entry_spread_ticks=Decimal("0.02"),
+        ),
+        make_market(yes_bid=Decimal("0.10"), yes_ask=Decimal("0.80")),
+        as_of=BASE_TIME + timedelta(minutes=5),
+    )
+
+    assert intent is not None
+    assert intent.price == Decimal("0.80")
+
+
 def test_closing_intent_has_opposite_side() -> None:
     strategy = MeanReversionStrategy()
     no_exit = strategy.evaluate_exit(

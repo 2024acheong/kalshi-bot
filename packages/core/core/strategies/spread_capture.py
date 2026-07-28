@@ -4,7 +4,11 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
-from core.execution.fees import compute_kalshi_fee
+from core.execution.fees import (
+    PAYOUT_CENTS_PER_CONTRACT,
+    compute_kalshi_fee_cents,
+    decimal_to_cents,
+)
 from core.risk.engine import OrderIntent
 from core.schemas.market import FeatureVector, MarketState
 @dataclass
@@ -16,12 +20,16 @@ class SpreadCaptureIntent:
     does not within max_resting_seconds, the unfilled leg should be cancelled by
     the component managing open orders. This strategy only decides intent; it does
     not manage order lifecycle or cancellation.
+
+    When max_resting_seconds=0, the runtime submits both legs as immediate market
+    orders and skips the pair unless both sides can fully fill (fill-or-kill).
     """
 
     yes_intent: OrderIntent
     no_intent: OrderIntent
     pair_id: str
     max_resting_seconds: int
+    require_atomic_fill: bool = True
 
 
 def detect_implied_probability_arbitrage(
@@ -39,14 +47,20 @@ def detect_implied_probability_arbitrage(
     if qty <= 0:
         return False, Decimal("0")
 
-    total_cost = market.yes_ask + market.no_ask
-    combined_fee = (
-        compute_kalshi_fee(market.yes_ask, qty)
-        + compute_kalshi_fee(market.no_ask, qty)
-    ) / qty
-    locked_profit = Decimal("1.00") - total_cost - combined_fee
-    if locked_profit <= Decimal("0"):
+    # Aggregate payout, cost, and fees in integer cents so rounding matches
+    # Kalshi's order-level fee rounding instead of dividing per-contract fees.
+    yes_ask_cents = decimal_to_cents(market.yes_ask)
+    no_ask_cents = decimal_to_cents(market.no_ask)
+    cost_cents = (yes_ask_cents + no_ask_cents) * qty
+    fee_cents = compute_kalshi_fee_cents(market.yes_ask, qty) + compute_kalshi_fee_cents(
+        market.no_ask, qty
+    )
+    payout_cents = PAYOUT_CENTS_PER_CONTRACT * qty
+    locked_profit_cents = payout_cents - cost_cents - fee_cents
+    if locked_profit_cents <= 0:
         return False, Decimal("0")
+
+    locked_profit = Decimal(locked_profit_cents) / Decimal(PAYOUT_CENTS_PER_CONTRACT * qty)
     return True, locked_profit
 
 

@@ -397,6 +397,13 @@ class TradingRuntime:
         market: MarketState,
         features: FeatureVector,
     ) -> None:
+        if pair.require_atomic_fill and not self._can_fill_arbitrage_pair(pair, market):
+            logger.info(
+                "Spread capture pair %s skipped: both legs must fully fill atomically",
+                pair.pair_id,
+            )
+            return
+
         yes_fill = await self._process_intent(pair.yes_intent, market, features)
         no_fill = await self._process_intent(pair.no_intent, market, features)
         if (
@@ -424,6 +431,21 @@ class TradingRuntime:
             yes_fill.status.value if yes_fill is not None else None,
             no_fill.status.value if no_fill is not None else None,
         )
+
+    def _can_fill_arbitrage_pair(
+        self,
+        pair: SpreadCaptureIntent,
+        market: MarketState,
+    ) -> bool:
+        qty = pair.yes_intent.qty
+        if pair.yes_intent.qty != pair.no_intent.qty:
+            return False
+        if market.yes_ask is None or market.no_ask is None:
+            return False
+
+        yes_size = market.yes_ask_size if market.yes_ask_size is not None else 0
+        no_size = market.no_ask_size if market.no_ask_size is not None else 0
+        return yes_size >= qty and no_size >= qty
 
     def _submit_resting_order_if_allowed(
         self,
