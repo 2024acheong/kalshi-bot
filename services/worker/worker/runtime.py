@@ -678,7 +678,7 @@ class TradingRuntime:
             },
         )
 
-        if decision != RiskDecision.ALLOW:
+        if decision == RiskDecision.BLOCK:
             logger.info(
                 "Order blocked ticker=%s decision=%s blocked_by=%s",
                 intent.ticker,
