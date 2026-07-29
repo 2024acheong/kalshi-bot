@@ -37,6 +37,10 @@ def make_market(**kwargs) -> MarketState:
         "yes_ask": Decimal("0.45"),
         "yes_bid_size": 100,
         "yes_ask_size": 100,
+        "no_bid": Decimal("0.55"),  # ADDED
+        "no_ask": Decimal("0.60"),  # ADDED
+        "no_bid_size": 100,         # ADDED
+        "no_ask_size": 100,         # ADDED
         "last_price": Decimal("0.42"),
         "volume_24h": 1000,
         "open_interest": 5000,
@@ -184,7 +188,7 @@ def test_entry_buys_no_when_prob_below_bid() -> None:
 
     assert intent is not None
     assert intent.side == "no"
-    assert intent.price == Decimal("0.40")
+    assert intent.price == Decimal("0.60")
     assert intent.qty == 14
     assert intent.estimated_edge == pytest.approx(0.15)
     assert intent.model_prob == 0.25
