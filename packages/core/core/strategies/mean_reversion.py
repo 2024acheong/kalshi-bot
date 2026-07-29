@@ -33,7 +33,8 @@ class MeanReversionStrategy:
         max_confirming_imbalance: float = 0.10,
         max_volume_zscore: float = 2.0,
         qty: int = 10,
-        stop_loss_spread_multiple: float = 2.0,
+        stop_loss_spread_multiple: float = 1.5,
+        take_profit_spread_multiple: float = 0.5,
         min_hours_to_close: float = 0.5,
     ):
         self.momentum_threshold = momentum_threshold
@@ -41,6 +42,7 @@ class MeanReversionStrategy:
         self.max_volume_zscore = max_volume_zscore
         self.qty = qty
         self.stop_loss_spread_multiple = stop_loss_spread_multiple
+        self.take_profit_spread_multiple = take_profit_spread_multiple
         self.min_hours_to_close = min_hours_to_close
 
     def evaluate(
@@ -90,7 +92,8 @@ class MeanReversionStrategy:
         if market.yes_bid <= 0 or market.yes_ask >= 1 or market.no_bid <= 0 or market.no_ask >= 1: #maybe change
             return None
 
-        estimated_edge = abs(momentum)
+        signal_strength = abs(momentum)
+        estimated_edge = signal_strength
         if momentum > 0:
             return OrderIntent(
                 ticker=market.ticker,
@@ -98,7 +101,7 @@ class MeanReversionStrategy:
                 price=market.no_ask,
                 qty=self.qty,
                 estimated_edge=estimated_edge,
-                model_prob=float(market.yes_bid) - estimated_edge,
+                model_prob=float(market.no_ask) - estimated_edge, # FIX
                 run_id=run_id,
             )
 
@@ -129,21 +132,41 @@ class MeanReversionStrategy:
         ):
             return None
 
+        held_time_hours = (
+            as_of - position.opened_at
+        ).total_seconds() / 3600
+
+        if held_time_hours > 4:
+            return OrderIntent(
+                ticker=position.ticker,
+                side=position.side,
+                price=market.no_bid if position.side == "no" else market.yes_bid,
+                qty=position.qty,
+                estimated_edge=0.0,
+                model_prob=0.5,
+                run_id="exit",
+                is_closing_order=True,
+            )
+
         stop_band = position.entry_spread_ticks * Decimal(str(self.stop_loss_spread_multiple))
+        profit_band = (
+            position.entry_spread_ticks
+            * Decimal(str(self.take_profit_spread_multiple))
+        )
+
         should_exit = False
 
         if position.side == "no":
             # Direct liquidation: selling NO at no_bid
             exit_price = market.no_bid
-            # Target Reversion: NO price went up (or YES mid went down)
-            # Implied YES exit price = 1.00 - market.no_bid
-            implied_yes_exit = Decimal("1.00") - exit_price
 
-            # Profit: implied YES price dropped below entry_mid
-            # Loss: implied YES price rose above entry_mid + stop_band
+            profit_target = position.entry_price + profit_band
+
+            stop_loss = position.entry_price - stop_band
+
             should_exit = (
-                implied_yes_exit <= position.entry_mid_price
-                or implied_yes_exit >= position.entry_mid_price + stop_band
+                exit_price >= profit_target
+                or exit_price <= stop_loss
             )
             closing_side = "no"
             price = market.no_bid
@@ -152,11 +175,13 @@ class MeanReversionStrategy:
             # Direct liquidation: selling YES at yes_bid
             exit_price = market.yes_bid
 
-            # Profit: YES price rose above entry_mid
-            # Loss: YES price fell below entry_mid - stop_band
+            profit_target = position.entry_price + profit_band
+
+            stop_loss = position.entry_price - stop_band
+
             should_exit = (
-                exit_price >= position.entry_mid_price
-                or exit_price <= position.entry_mid_price - stop_band
+                exit_price >= profit_target
+                or exit_price <= stop_loss
             )
             closing_side = "yes"
             price = market.yes_bid
