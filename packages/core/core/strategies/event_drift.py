@@ -96,10 +96,10 @@ class EventDriftStrategy:
         ):
             return None
 
-        if market.yes_bid is None or market.yes_ask is None:
+        if market.yes_bid is None or market.yes_ask is None or market.no_bid is None or market.no_ask is None:
             return None
 
-        if market.yes_bid <= 0 or market.yes_ask >= 1:
+        if market.yes_bid <= 0 or market.yes_ask >= 1 or market.no_bid <= 0 or market.no_ask >= 1:
             return None
 
         estimated_edge = abs(momentum)
@@ -117,7 +117,7 @@ class EventDriftStrategy:
         return OrderIntent(
             ticker=market.ticker,
             side="no",
-            price=market.yes_bid,
+            price=market.no_ask,
             qty=self.qty,
             estimated_edge=estimated_edge,
             model_prob=float(market.yes_bid) - estimated_edge,
@@ -134,7 +134,7 @@ class EventDriftStrategy:
         """
         Exit when momentum exhausts or the market is approaching close.
         """
-        if market.yes_bid is None or market.yes_ask is None:
+        if market.yes_bid is None or market.yes_ask is None or market.no_bid is None or market.no_ask is None:
             return None
 
         should_exit = False
@@ -162,7 +162,13 @@ class EventDriftStrategy:
             return None
 
         closing_side = "yes" if position.side == "no" else "no"
-        price = market.yes_ask if closing_side == "yes" else market.yes_bid
+        # price = market.yes_ask if closing_side == "yes" else market.yes_bid
+        # Correct closing price resolution:
+        if closing_side == "yes":
+            price = market.yes_ask  # Buying YES to close/hedge
+        elif closing_side == "no":
+            price = market.no_ask   # Buying NO to close/hedge
+
         if price is None:
             return None
 

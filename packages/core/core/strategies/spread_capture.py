@@ -42,7 +42,7 @@ def detect_implied_probability_arbitrage(
     One of the two contracts pays $1.00 at resolution, so the locked profit per
     contract is payout minus both ask prices minus the per-contract combined fees.
     """
-    if market.no_bid is None or market.no_ask is None or market.yes_ask is None:
+    if market.no_bid is None or market.no_ask is None or market.yes_ask is None or market.yes_bid is None:
         return False, Decimal("0")
     if qty <= 0:
         return False, Decimal("0")

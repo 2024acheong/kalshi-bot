@@ -84,10 +84,10 @@ class MeanReversionStrategy:
         ):
             return None
 
-        if market.yes_bid is None or market.yes_ask is None:
+        if market.yes_bid is None or market.yes_ask is None or market.no_bid is None or market.no_ask is None:
             return None
 
-        if market.yes_bid <= 0 or market.yes_ask >= 1:
+        if market.yes_bid <= 0 or market.yes_ask >= 1 or market.no_bid <= 0 or market.no_ask >= 1: #maybe change
             return None
 
         estimated_edge = abs(momentum)
@@ -95,7 +95,7 @@ class MeanReversionStrategy:
             return OrderIntent(
                 ticker=market.ticker,
                 side="no",
-                price=market.yes_bid,
+                price=market.no_ask,
                 qty=self.qty,
                 estimated_edge=estimated_edge,
                 model_prob=float(market.yes_bid) - estimated_edge,
@@ -121,7 +121,7 @@ class MeanReversionStrategy:
         """
         Return an aggressive closing order if reversion or stop-loss is triggered.
         """
-        if market.yes_bid is None or market.yes_ask is None:
+        if market.yes_bid is None or market.yes_ask is None or market.no_bid is None or market.no_ask is None:
             return None
 
         stop_band = position.entry_spread_ticks * Decimal(str(self.stop_loss_spread_multiple))
@@ -130,7 +130,7 @@ class MeanReversionStrategy:
         # Evaluate exits against executable prices, not mid, so wide spreads cannot
         # mask the true cost of closing (e.g. buying YES at ask to exit a NO leg).
         if position.side == "no":
-            exit_price = market.yes_ask
+            exit_price = market.no_bid
             if exit_price is not None:
                 should_exit = (
                     exit_price <= position.entry_mid_price
@@ -148,7 +148,13 @@ class MeanReversionStrategy:
             return None
 
         closing_side = "yes" if position.side == "no" else "no"
-        price = market.yes_ask if closing_side == "yes" else market.yes_bid
+        # price = market.yes_ask if closing_side == "yes" else market.yes_bid
+        # Correct closing price resolution:
+        if closing_side == "yes":
+            price = market.yes_ask  # Buying YES to close/hedge
+        elif closing_side == "no":
+            price = market.no_ask   # Buying NO to close/hedge
+
         if price is None:
             return None
 
