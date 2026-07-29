@@ -133,29 +133,47 @@ def test_fade_downward_momentum_buys_yes_side() -> None:
     assert intent.estimated_edge == 0.05
 
 
-def test_exit_on_reversion_achieved_no_side() -> None:
-    intent = MeanReversionStrategy().evaluate_exit(
-        make_position(side="no", entry_mid_price=Decimal("0.50")),
-        make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"),
-            no_bid=Decimal("0.53"), no_ask=Decimal("0.55")),
-        as_of=BASE_TIME + timedelta(minutes=5),
+def test_exit_when_no_bid_hits_profit_target() -> None:
+    # intent = MeanReversionStrategy().evaluate_exit(
+    #     make_position(side="no", entry_mid_price=Decimal("0.50")),
+    #     make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"),
+    #         no_bid=Decimal("0.53"), no_ask=Decimal("0.55")),
+    #     as_of=BASE_TIME + timedelta(minutes=5),
+    # )
+
+    # assert intent is not None
+    # assert intent.is_closing_order is True
+    position = make_position(
+        side="no",
+        entry_price=Decimal("0.51"),
+        entry_spread_ticks=Decimal("0.02"),
     )
 
+    market = make_market(
+        no_bid=Decimal("0.52"),
+        no_ask=Decimal("0.54"),
+    )
+
+    intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
+
     assert intent is not None
-    assert intent.is_closing_order is True
+    assert intent.price == Decimal("0.52")
 
 
 def test_exit_on_stop_loss_no_side() -> None:
-    intent = MeanReversionStrategy().evaluate_exit(
-        make_position(
-            side="no",
-            entry_mid_price=Decimal("0.50"),
-            entry_spread_ticks=Decimal("0.02"),
-        ),
-        make_market(yes_bid=Decimal("0.54"), yes_ask=Decimal("0.56"),
-            no_bid=Decimal("0.44"), no_ask=Decimal("0.46")),
-        as_of=BASE_TIME + timedelta(minutes=5),
+    position = make_position(
+        side="no",
+        entry_price=Decimal("0.51"),
+        entry_spread_ticks=Decimal("0.02"),
     )
+
+    market = make_market(
+        no_bid=Decimal("0.46"),
+        no_ask=Decimal("0.48"),
+    )
+
+    intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
+
 
     assert intent is not None
 
@@ -169,18 +187,6 @@ def test_no_exit_when_neither_condition_met() -> None:
             no_bid=Decimal("0.49"),
             no_ask=Decimal("0.51"),
         ),
-        as_of=BASE_TIME + timedelta(minutes=5),
-    )
-
-    assert intent is None
-
-
-def test_no_exit_when_mid_reverts_but_executable_price_does_not() -> None:
-    """Under direct position sale, only the NO order book determines the exit signal — YES-side volatility alone shouldn't trigger an exit"""
-    intent = MeanReversionStrategy().evaluate_exit(
-        make_position(side="no", entry_mid_price=Decimal("0.50")),
-        make_market(yes_bid=Decimal("0.40"), yes_ask=Decimal("0.56"),
-            no_bid=Decimal("0.49"), no_ask=Decimal("0.51")),  # NO side unchanged from entry,
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
@@ -223,3 +229,51 @@ def test_closing_intent_has_same_side() -> None:
     assert no_exit.side == "no"
     assert yes_exit is not None
     assert yes_exit.side == "yes"
+
+def test_no_exit_at_break_even() -> None:
+    position = make_position(
+        side="no",
+        entry_price=Decimal("0.51"),
+        entry_spread_ticks=Decimal("0.02"),
+    )
+
+    market = make_market(
+        no_bid=Decimal("0.51"),
+        no_ask=Decimal("0.53"),
+    )
+
+    intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
+
+    assert intent is None
+
+def test_yes_exit_profit_target() -> None:
+    position = make_position(
+        side="yes",
+        entry_price=Decimal("0.51"),
+        entry_spread_ticks=Decimal("0.02"),
+    )
+
+    market = make_market(
+        yes_bid=Decimal("0.52"),
+        yes_ask=Decimal("0.54"),
+    )
+
+    intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
+
+    assert intent is not None
+
+def test_profit_requires_more_than_entry_price() -> None:
+    position = make_position(
+        side="no",
+        entry_price=Decimal("0.51"),
+        entry_spread_ticks=Decimal("0.02"),
+    )
+
+    market = make_market(
+        no_bid=Decimal("0.515"),
+        no_ask=Decimal("0.535"),
+    )
+
+    intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
+
+    assert intent is None
