@@ -121,45 +121,49 @@ class MeanReversionStrategy:
         """
         Return an aggressive closing order if reversion or stop-loss is triggered.
         """
-        if market.yes_bid is None or market.yes_ask is None or market.no_bid is None or market.no_ask is None:
+        if (
+            market.yes_bid is None
+            or market.yes_ask is None
+            or market.no_bid is None
+            or market.no_ask is None
+        ):
             return None
 
         stop_band = position.entry_spread_ticks * Decimal(str(self.stop_loss_spread_multiple))
         should_exit = False
 
-        # Evaluate exits against executable prices, not mid, so wide spreads cannot
-        # mask the true cost of closing (e.g. buying YES at ask to exit a NO leg).
         if position.side == "no":
+            # Direct liquidation: selling NO at no_bid
             exit_price = market.no_bid
-            if exit_price is not None:
-                should_exit = (
-                    exit_price <= position.entry_mid_price
-                    or exit_price >= position.entry_mid_price + stop_band
-                )
+            # Target Reversion: NO price went up (or YES mid went down)
+            # Implied YES exit price = 1.00 - market.no_bid
+            implied_yes_exit = Decimal("1.00") - exit_price
+
+            # Profit: implied YES price dropped below entry_mid
+            # Loss: implied YES price rose above entry_mid + stop_band
+            should_exit = (
+                implied_yes_exit <= position.entry_mid_price
+                or implied_yes_exit >= position.entry_mid_price + stop_band
+            )
+            closing_side = "no"
+            price = market.no_bid
+
         elif position.side == "yes":
+            # Direct liquidation: selling YES at yes_bid
             exit_price = market.yes_bid
-            if exit_price is not None:
-                should_exit = (
-                    exit_price >= position.entry_mid_price
-                    or exit_price <= position.entry_mid_price - stop_band
-                )
 
-        if not should_exit:
+            # Profit: YES price rose above entry_mid
+            # Loss: YES price fell below entry_mid - stop_band
+            should_exit = (
+                exit_price >= position.entry_mid_price
+                or exit_price <= position.entry_mid_price - stop_band
+            )
+            closing_side = "yes"
+            price = market.yes_bid
+
+        if not should_exit or price is None:
             return None
 
-        closing_side = "yes" if position.side == "no" else "no"
-        # price = market.yes_ask if closing_side == "yes" else market.yes_bid
-        # Correct closing price resolution:
-        if closing_side == "yes":
-            price = market.yes_ask  # Buying YES to close/hedge
-        elif closing_side == "no":
-            price = market.no_ask   # Buying NO to close/hedge
-
-        if price is None:
-            return None
-
-        # Closing trades are about realizing or cutting an existing position,
-        # not opening a fresh signal; use a small neutral placeholder edge.
         return OrderIntent(
             ticker=position.ticker,
             side=closing_side,

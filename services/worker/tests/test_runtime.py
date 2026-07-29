@@ -47,6 +47,10 @@ def make_market(**kwargs) -> MarketState:
         "yes_ask": Decimal("0.48"),
         "yes_bid_size": 100,
         "yes_ask_size": 100,
+        "no_bid": Decimal("0.52"),  # ADDED
+        "no_ask": Decimal("0.54"),  # ADDED
+        "no_bid_size": 100,         # ADDED
+        "no_ask_size": 100,         # ADDED
         "last_price": Decimal("0.47"),
         "volume_24h": 1000,
         "open_interest": 5000,
@@ -472,14 +476,20 @@ async def test_runtime_opens_mean_reversion_position(monkeypatch) -> None:
 
 @pytest.mark.anyio
 async def test_runtime_closes_mean_reversion_position(monkeypatch) -> None:
-    market = make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"))
+    # market = make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"))
+    market = make_market(
+        yes_bid=Decimal("0.38"),
+        yes_ask=Decimal("0.40"),
+        no_bid=Decimal("0.60"),  # Higher no_bid triggers profit-take/exit on NO side
+        no_ask=Decimal("0.62"),
+    )
     risk_engine = MagicMock()
     risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
         intent, RiskDecision.ALLOW
     )
     fill_result = FillResult(
         order_id="order-2",
-        fill_price=Decimal("0.49"),
+        fill_price=Decimal("0.60"),
         fill_qty=10,
         fee=Decimal("0.17"),
         fill_latency_ms=200,

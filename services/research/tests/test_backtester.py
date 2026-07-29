@@ -167,13 +167,17 @@ def test_backtest_tracks_mean_reversion_entry_and_exit(monkeypatch) -> None:
     snapshots = [
         make_market(
             index=0,
-            yes_bid=Decimal("0.49"),
-            yes_ask=Decimal("0.51"),
+            yes_bid=Decimal("0.38"),
+            yes_ask=Decimal("0.40"),
+            no_bid=Decimal("0.60"),  # ADDED
+            no_ask=Decimal("0.62"),  # ADDED
         ),
         make_market(
             index=1,
-            yes_bid=Decimal("0.47"),
-            yes_ask=Decimal("0.49"),
+            yes_bid=Decimal("0.55"),
+            yes_ask=Decimal("0.57"),
+            no_bid=Decimal("0.43"),  # ADDED
+            no_ask=Decimal("0.45"),  # ADDED
         ),
     ]
     patch_loader(monkeypatch, snapshots)
@@ -203,7 +207,7 @@ def test_backtest_tracks_mean_reversion_entry_and_exit(monkeypatch) -> None:
 
     assert result["total_intents"] == 2
     assert result["total_orders_allowed"] == 2
-    assert [fill["side"] for fill in result["fills"]] == ["no", "yes"]
+    assert [fill["side"] for fill in result["fills"]] == ["no", "no"]  # was ["no", "yes"]
 
 
 def test_backtest_tracks_event_drift_entry_and_exit(monkeypatch) -> None:
