@@ -18,6 +18,10 @@ def make_market(**kwargs) -> MarketState:
         "yes_ask": Decimal("0.51"),
         "yes_bid_size": 100,
         "yes_ask_size": 100,
+        "no_bid": Decimal("0.49"),  # ADDED
+        "no_ask": Decimal("0.51"),  # ADDED
+        "no_bid_size": 100,         # ADDED
+        "no_ask_size": 100,         # ADDED
         "last_price": Decimal("0.50"),
         "volume_24h": 1000,
         "open_interest": 5000,
@@ -158,7 +162,7 @@ def test_follows_downward_momentum_sells_no_side() -> None:
 
     assert intent is not None
     assert intent.side == "no"
-    assert intent.price == Decimal("0.49")
+    assert intent.price == Decimal("0.51")
     assert intent.estimated_edge == 0.05
 
 

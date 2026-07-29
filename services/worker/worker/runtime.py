@@ -204,11 +204,18 @@ class TradingRuntime:
         if fill_result is None or fill_result.fill_qty <= 0:
             return
 
-        if market.yes_bid is None or market.yes_ask is None:
+        if market.yes_bid is None or market.yes_ask is None or market.no_bid is None or market.no_ask is None:
             return
 
-        entry_mid_price = (market.yes_bid + market.yes_ask) / 2
-        entry_spread_ticks = market.yes_ask - market.yes_bid
+        # entry_mid_price = (market.yes_bid + market.yes_ask) / 2
+        # entry_spread_ticks = market.yes_ask - market.yes_bid
+        if entry_intent.side == "yes":
+            entry_mid_price = (market.yes_bid + market.yes_ask) / Decimal("2")
+            entry_spread_ticks = market.yes_ask - market.yes_bid
+        else:
+            entry_mid_price = (market.no_bid + market.no_ask) / Decimal("2")
+            entry_spread_ticks = market.no_ask - market.no_bid
+
         position = MeanReversionPosition(
             ticker=market.ticker,
             side=entry_intent.side,
@@ -273,11 +280,18 @@ class TradingRuntime:
         if (
             market.yes_bid is None
             or market.yes_ask is None
+            or market.no_bid is None
+            or market.no_ask is None
             or features.price_momentum_1h is None
         ):
             return
 
-        entry_mid_price = (market.yes_bid + market.yes_ask) / 2
+        # entry_mid_price = (market.yes_bid + market.yes_ask) / 2
+        if entry_intent.side == "yes":
+            entry_mid_price = (market.yes_bid + market.yes_ask) / Decimal("2")
+        else:
+            entry_mid_price = (market.no_bid + market.no_ask) / Decimal("2")
+            
         position = EventDriftPosition(
             ticker=market.ticker,
             side=entry_intent.side,

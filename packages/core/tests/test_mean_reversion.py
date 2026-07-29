@@ -18,6 +18,10 @@ def make_market(**kwargs) -> MarketState:
         "yes_ask": Decimal("0.51"),
         "yes_bid_size": 100,
         "yes_ask_size": 100,
+        "no_bid": Decimal("0.49"),  # ADDED
+        "no_ask": Decimal("0.51"),  # ADDED
+        "no_bid_size": 100,         # ADDED
+        "no_ask_size": 100,         # ADDED
         "last_price": Decimal("0.50"),
         "volume_24h": 1000,
         "open_interest": 5000,
@@ -112,7 +116,7 @@ def test_fade_upward_momentum_sells_no_side() -> None:
 
     assert intent is not None
     assert intent.side == "no"
-    assert intent.price == Decimal("0.49")
+    assert intent.price == Decimal("0.51")
     assert intent.estimated_edge == 0.05
 
 
@@ -132,7 +136,8 @@ def test_fade_downward_momentum_buys_yes_side() -> None:
 def test_exit_on_reversion_achieved_no_side() -> None:
     intent = MeanReversionStrategy().evaluate_exit(
         make_position(side="no", entry_mid_price=Decimal("0.50")),
-        make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49")),
+        make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"),
+            no_bid=Decimal("0.53"), no_ask=Decimal("0.55")),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
@@ -147,7 +152,8 @@ def test_exit_on_stop_loss_no_side() -> None:
             entry_mid_price=Decimal("0.50"),
             entry_spread_ticks=Decimal("0.02"),
         ),
-        make_market(yes_bid=Decimal("0.54"), yes_ask=Decimal("0.56")),
+        make_market(yes_bid=Decimal("0.54"), yes_ask=Decimal("0.56"),
+            no_bid=Decimal("0.44"), no_ask=Decimal("0.46")),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
@@ -157,7 +163,12 @@ def test_exit_on_stop_loss_no_side() -> None:
 def test_no_exit_when_neither_condition_met() -> None:
     intent = MeanReversionStrategy().evaluate_exit(
         make_position(side="no", entry_mid_price=Decimal("0.50")),
-        make_market(yes_bid=Decimal("0.51"), yes_ask=Decimal("0.53")),
+        make_market(
+            yes_bid=Decimal("0.49"),
+            yes_ask=Decimal("0.51"),
+            no_bid=Decimal("0.49"),
+            no_ask=Decimal("0.51"),
+        ),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
@@ -165,10 +176,11 @@ def test_no_exit_when_neither_condition_met() -> None:
 
 
 def test_no_exit_when_mid_reverts_but_executable_price_does_not() -> None:
-    """Wide spreads can show favorable mid while exit cost remains expensive."""
+    """Under direct position sale, only the NO order book determines the exit signal — YES-side volatility alone shouldn't trigger an exit"""
     intent = MeanReversionStrategy().evaluate_exit(
-        make_position(side="no", entry_mid_price=Decimal("0.45")),
-        make_market(yes_bid=Decimal("0.38"), yes_ask=Decimal("0.48")),
+        make_position(side="no", entry_mid_price=Decimal("0.50")),
+        make_market(yes_bid=Decimal("0.40"), yes_ask=Decimal("0.56"),
+            no_bid=Decimal("0.49"), no_ask=Decimal("0.51")),  # NO side unchanged from entry,
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
@@ -182,19 +194,23 @@ def test_exit_on_stop_loss_when_executable_price_spikes() -> None:
             entry_mid_price=Decimal("0.45"),
             entry_spread_ticks=Decimal("0.02"),
         ),
-        make_market(yes_bid=Decimal("0.10"), yes_ask=Decimal("0.80")),
+        make_market(yes_bid=Decimal("0.10"), yes_ask=Decimal("0.80"),
+            no_bid=Decimal("0.10"), no_ask=Decimal("0.15")),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
     assert intent is not None
-    assert intent.price == Decimal("0.80")
+    assert intent.price == Decimal("0.10")
 
 
-def test_closing_intent_has_opposite_side() -> None:
+def test_closing_intent_has_same_side() -> None:
     strategy = MeanReversionStrategy()
     no_exit = strategy.evaluate_exit(
         make_position(side="no", entry_mid_price=Decimal("0.50")),
-        make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49")),
+        make_market(
+            yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"),
+            no_bid=Decimal("0.53"), no_ask=Decimal("0.55"),
+        ),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
     yes_exit = strategy.evaluate_exit(
@@ -204,6 +220,6 @@ def test_closing_intent_has_opposite_side() -> None:
     )
 
     assert no_exit is not None
-    assert no_exit.side == "yes"
+    assert no_exit.side == "no"
     assert yes_exit is not None
-    assert yes_exit.side == "no"
+    assert yes_exit.side == "yes"

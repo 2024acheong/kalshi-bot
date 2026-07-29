@@ -201,7 +201,7 @@ class CalibrationMispricingStrategy:
             self._log_hold(market, "model_prob_none")
             return None
 
-        if market.yes_bid is None or market.yes_ask is None:
+        if market.yes_bid is None or market.yes_ask is None or market.no_bid is None or market.no_ask is None:
             self._log_hold(market, "missing_book", model_prob=model_prob)
             return None
 
@@ -253,9 +253,11 @@ class CalibrationMispricingStrategy:
 
         # 2. Edge falls below bid -> Buy NO
         elif model_prob < bid_price:
+            no_ask_price = float(market.no_ask) if market.no_ask is not None else (1.0 - bid_price)
+
             qty = compute_proper_betting_size(
-                model_prob=model_prob,
-                market_price=bid_price,
+                model_prob=1.0 - model_prob,
+                market_price=no_ask_price,
                 max_qty=self.max_qty,
                 scoring_rule=ProperScoringRule.LOGARITHMIC,
                 scale_factor=self.scale_factor,
@@ -264,9 +266,9 @@ class CalibrationMispricingStrategy:
                 return OrderIntent(
                     ticker=market.ticker,
                     side="no",
-                    price=market.yes_bid,
+                    price=market.no_ask,
                     qty=qty,
-                    estimated_edge=bid_price - model_prob,
+                    estimated_edge=(1.0 - model_prob) - no_ask_price,
                     model_prob=model_prob,
                     run_id=run_id,
                 )
@@ -298,14 +300,20 @@ class CalibrationMispricingStrategy:
             )
         elif current_prob is not None and position.side == "no":
             should_exit = should_exit or (
-                float(market.yes_bid) - current_prob < self.exit_edge_threshold
+                (1.0 - current_prob) - float(market.no_ask) < self.exit_edge_threshold
             )
 
         if not should_exit:
             return None
 
         closing_side = "yes" if position.side == "no" else "no"
-        price = market.yes_ask if closing_side == "yes" else market.yes_bid
+        # price = market.yes_ask if closing_side == "yes" else market.yes_bid
+        # Correct closing price resolution:
+        if closing_side == "yes":
+            price = market.yes_ask  # Buying YES to close/hedge
+        elif closing_side == "no":
+            price = market.no_ask   # Buying NO to close/hedge
+
         if price is None:
             return None
 
