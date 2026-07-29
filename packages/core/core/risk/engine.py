@@ -120,7 +120,11 @@ def check_liquidity(
     features: FeatureVector,
     config: RiskConfig,
 ) -> RiskGateResult:
-    book_size = market.yes_bid_size if intent.side == "yes" else market.yes_ask_size
+    # book_size = market.yes_bid_size if intent.side == "yes" else market.yes_ask_size
+    if intent.side == "yes":
+        book_size = market.yes_ask_size
+    else:
+        book_size = market.no_ask_size
     max_order_qty = (
         int(book_size * config.max_order_pct_of_book) if book_size is not None else None
     )
