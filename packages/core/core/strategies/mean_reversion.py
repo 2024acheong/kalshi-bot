@@ -136,57 +136,34 @@ class MeanReversionStrategy:
             as_of - position.opened_at
         ).total_seconds() / 3600
 
-        if held_time_hours > 4:
-            return OrderIntent(
-                ticker=position.ticker,
-                side=position.side,
-                price=market.no_bid if position.side == "no" else market.yes_bid,
-                qty=position.qty,
-                estimated_edge=0.0,
-                model_prob=0.5,
-                run_id="exit",
-                is_closing_order=True,
-            )
-
         stop_band = position.entry_spread_ticks * Decimal(str(self.stop_loss_spread_multiple))
         profit_band = (
             position.entry_spread_ticks
             * Decimal(str(self.take_profit_spread_multiple))
         )
 
-        should_exit = False
-
         if position.side == "no":
-            # Direct liquidation: selling NO at no_bid
-            exit_price = market.no_bid
-
-            profit_target = position.entry_price + profit_band
-
-            stop_loss = position.entry_price - stop_band
-
-            should_exit = (
-                exit_price >= profit_target
-                or exit_price <= stop_loss
-            )
-            closing_side = "no"
-            price = market.no_bid
+            closing_side = "yes"
+            price = market.yes_ask
 
         elif position.side == "yes":
-            # Direct liquidation: selling YES at yes_bid
-            exit_price = market.yes_bid
+            closing_side = "no"
+            price = market.no_ask
+        else:
+            return None
 
-            profit_target = position.entry_price + profit_band
+        if price is None:
+            return None
 
-            stop_loss = position.entry_price - stop_band
+        if held_time_hours > 4:
+            should_exit = True
+        else:
+            complementary_entry = Decimal("1") - position.entry_price
+            profit_target = complementary_entry - profit_band
+            stop_loss = complementary_entry + stop_band
+            should_exit = price <= profit_target or price >= stop_loss
 
-            should_exit = (
-                exit_price >= profit_target
-                or exit_price <= stop_loss
-            )
-            closing_side = "yes"
-            price = market.yes_bid
-
-        if not should_exit or price is None:
+        if not should_exit:
             return None
 
         return OrderIntent(

@@ -207,7 +207,7 @@ def test_backtest_tracks_mean_reversion_entry_and_exit(monkeypatch) -> None:
 
     assert result["total_intents"] == 2
     assert result["total_orders_allowed"] == 2
-    assert [fill["side"] for fill in result["fills"]] == ["no", "no"]  # was ["no", "yes"]
+    assert [fill["side"] for fill in result["fills"]] == ["no", "yes"]  # was ["no", "yes"]
 
 
 def test_backtest_tracks_event_drift_entry_and_exit(monkeypatch) -> None:

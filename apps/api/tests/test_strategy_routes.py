@@ -44,6 +44,27 @@ def test_start_strategy_returns_404_for_invalid_config(
     publish.assert_not_called()
 
 
+def test_reset_paper_account_publishes_command_for_valid_config(
+    client,
+    auth_headers,
+    monkeypatch,
+) -> None:
+    publish = AsyncMock()
+    monkeypatch.setattr("api.routes.strategy.publish_command", publish)
+    monkeypatch.setattr("api.routes.strategy.strategy_config_exists", lambda config_id: True)
+
+    response = client.post(
+        "/strategies/config-1/paper/reset",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    publish.assert_awaited_once_with(
+        "worker:commands",
+        {"command": "reset_paper_account", "config_id": "config-1"},
+    )
+
+
 def test_kill_switch_activate_publishes_and_logs(
     client,
     auth_headers,

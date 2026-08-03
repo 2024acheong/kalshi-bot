@@ -54,7 +54,10 @@ def make_features(**kwargs) -> FeatureVector:
 
 
 def test_evaluate_ignores_passive_spread_conditions_without_arbitrage() -> None:
-    result = SpreadCaptureStrategy().evaluate(
+    result = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate(
         make_market(
             yes_bid=Decimal("0.40"),
             yes_ask=Decimal("0.60"),
@@ -69,7 +72,10 @@ def test_evaluate_ignores_passive_spread_conditions_without_arbitrage() -> None:
 
 
 def test_holds_on_insufficient_time() -> None:
-    result = SpreadCaptureStrategy().evaluate(
+    result = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate(
         make_market(),
         make_features(time_to_close_hours=0.1),
         run_id="run-1",
@@ -79,7 +85,10 @@ def test_holds_on_insufficient_time() -> None:
 
 
 def test_holds_when_fees_erase_arbitrage() -> None:
-    result = SpreadCaptureStrategy().evaluate(
+    result = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate(
         make_market(yes_ask=Decimal("0.48"), no_ask=Decimal("0.45")),
         make_features(),
         run_id="run-1",
@@ -89,7 +98,10 @@ def test_holds_when_fees_erase_arbitrage() -> None:
 
 
 def test_enters_only_on_true_arbitrage() -> None:
-    result = SpreadCaptureStrategy().evaluate(make_market(), make_features(), run_id="run-1")
+    result = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate(make_market(), make_features(), run_id="run-1")
 
     assert isinstance(result, SpreadCaptureIntent)
     assert result.yes_intent.side == "yes"
@@ -106,7 +118,10 @@ def test_enters_only_on_true_arbitrage() -> None:
 def test_arbitrage_intents_cross_yes_and_no_asks() -> None:
     market = make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45"))
 
-    result = SpreadCaptureStrategy().evaluate(market, make_features(), run_id="run-1")
+    result = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate(market, make_features(), run_id="run-1")
 
     assert result is not None
     assert result.yes_intent.price == market.yes_ask
@@ -114,7 +129,10 @@ def test_arbitrage_intents_cross_yes_and_no_asks() -> None:
 
 
 def test_pair_id_is_unique() -> None:
-    strategy = SpreadCaptureStrategy()
+    strategy = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    )
     first = strategy.evaluate(make_market(), make_features(), run_id="run-1")
     second = strategy.evaluate(make_market(), make_features(), run_id="run-1")
 

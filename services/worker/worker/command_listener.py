@@ -80,6 +80,8 @@ class CommandListener:
         elif command == "clear_kill_switch":
             self.runtime.deactivate_kill_switch()
             logger.warning("Kill switch deactivated")
+        elif command == "reset_paper_account":
+            self.runtime.reset_paper_account()
         elif command == "start_run":
             logger.info(
                 "start_run received - treating as resume() for now "

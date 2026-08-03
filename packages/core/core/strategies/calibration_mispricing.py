@@ -307,12 +307,7 @@ class CalibrationMispricingStrategy:
             return None
 
         closing_side = "yes" if position.side == "no" else "no"
-        # price = market.yes_ask if closing_side == "yes" else market.yes_bid
-        # Correct closing price resolution:
-        if closing_side == "yes":
-            price = market.yes_ask  # Buying YES to close/hedge
-        elif closing_side == "no":
-            price = market.no_ask   # Buying NO to close/hedge
+        price = market.yes_ask if closing_side == "yes" else market.no_ask
 
         if price is None:
             return None
