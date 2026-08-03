@@ -596,13 +596,16 @@ export default async function PerformancePage() {
 
   const rows = [...byRun.entries()]
     .map(([runId, row]) => {
-      const unmatchedFees = row.fees - row.lockedArbFees - row.realizedFees
-      const paperPnl = row.openMarkPnl + row.lockedArbPnl + row.realizedPnl - unmatchedFees
       const account = row.configId ? accountByConfigId.get(row.configId) ?? null : null
       const startingCash = Number(account?.starting_cash ?? 0)
       const cashBalance = Number(account?.cash_balance ?? 0)
       const reservedCash = Number(account?.reserved_cash ?? 0)
-      const ledgerPnl = account ? cashBalance + reservedCash - startingCash : null
+      const paperPnl = account
+        ? cashBalance + reservedCash - startingCash
+        : row.openMarkPnl +
+          row.lockedArbPnl +
+          row.realizedPnl -
+          (row.fees - row.lockedArbFees - row.realizedFees)
       return {
         runId,
         ...row,
@@ -611,8 +614,6 @@ export default async function PerformancePage() {
         cashBalance,
         reservedCash,
         buyingPower: Math.max(cashBalance - reservedCash, 0),
-        ledgerPnl,
-        unmatchedFees,
         fillRate: row.signals === 0 ? null : row.fills / row.signals,
         avgEdge: row.signals === 0 ? null : row.edgeTotal / row.signals,
         avgProbability: row.signals === 0 ? null : row.probabilityTotal / row.signals,
@@ -685,7 +686,6 @@ export default async function PerformancePage() {
               <th>Locked Arb</th>
               <th>Open Mark</th>
               <th>Buying Power</th>
-              <th>Ledger PnL</th>
               <th>Fees</th>
               <th>Fills</th>
               <th>Fill Rate</th>
@@ -707,9 +707,6 @@ export default async function PerformancePage() {
                 <td>{formatCurrency(row.lockedArbPnl)}</td>
                 <td>{formatCurrency(row.openMarkPnl)}</td>
                 <td>{row.account ? formatCurrency(row.buyingPower) : '-'}</td>
-                <td className={(row.ledgerPnl ?? 0) >= 0 ? 'green mono' : 'red mono'}>
-                  {row.ledgerPnl === null ? '-' : formatCurrency(row.ledgerPnl)}
-                </td>
                 <td>{formatCurrency(row.fees)}</td>
                 <td>{row.fills}</td>
                 <td>{formatPercent(row.fillRate)}</td>

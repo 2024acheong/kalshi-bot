@@ -15,7 +15,7 @@ class OrderIntent:
     price: Decimal
     qty: int
     estimated_edge: float
-    model_prob: float
+    model_prob: float | None
     run_id: str
     signal_id: str | None = None
     is_closing_order: bool = False

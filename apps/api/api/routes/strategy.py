@@ -130,6 +130,15 @@ async def resume_strategy(
     return await _publish({"command": "resume_strategy", "config_id": config_id})
 
 
+@router.post("/strategies/{config_id}/paper/reset")
+async def reset_strategy_paper_account(
+    config_id: str,
+    operator: Annotated[dict[str, Any], Depends(get_current_operator)],
+) -> dict[str, Any]:
+    _require_strategy_config(config_id)
+    return await _publish({"command": "reset_paper_account", "config_id": config_id})
+
+
 @router.post("/kill-switch/activate")
 async def activate_kill_switch(
     request: KillSwitchRequest,

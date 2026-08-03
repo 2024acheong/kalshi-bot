@@ -191,10 +191,6 @@ export default async function StrategiesPage() {
         ? null
         : configSignals.reduce((total, signal) => total + Number(signal.edge ?? 0), 0) /
           configSignals.length
-    const openPnl = configPositions.reduce(
-      (total, position) => total + Number(position.unrealized_pnl ?? 0),
-      0,
-    )
     const fills = configOrders.flatMap((order) => order.fills ?? [])
     const fees = fills.reduce((total, fill) => total + Number(fill.fee ?? 0), 0)
     const account = accountByConfigId.get(config.id) ?? null
@@ -202,7 +198,7 @@ export default async function StrategiesPage() {
     const cashBalance = Number(account?.cash_balance ?? 0)
     const reservedCash = Number(account?.reserved_cash ?? 0)
     const buyingPower = Math.max(cashBalance - reservedCash, 0)
-    const ledgerPnl = account ? cashBalance + reservedCash - startingCash : null
+    const paperPnl = account ? cashBalance + reservedCash - startingCash : null
     return {
       config,
       latestRun,
@@ -214,24 +210,19 @@ export default async function StrategiesPage() {
       latestActivity,
       avgEdge,
       openPositions: configPositions.length,
-      openPnl,
       fees,
       account,
       startingCash,
       cashBalance,
       reservedCash,
       buyingPower,
-      ledgerPnl,
+      paperPnl,
     }
   })
 
   const enabled = configs.filter((config) => config.status === 'enabled').length
   const activeRuns = runs.filter((run) => !run.ended_at).length
   const paperRuns = runs.filter((run) => run.mode === 'paper').length
-  const openPnl = positions.reduce(
-    (total, position) => total + Number(position.unrealized_pnl ?? 0),
-    0,
-  )
   const totalFees = rows.reduce((total, row) => total + row.fees, 0)
   const totalBuyingPower = rows.reduce((total, row) => total + row.buyingPower, 0)
   const totalReservedCash = rows.reduce((total, row) => total + row.reservedCash, 0)
@@ -318,9 +309,9 @@ export default async function StrategiesPage() {
               <span className="mono">{row.account ? formatCurrency(row.reservedCash) : '-'}</span>
             </div>
             <div className="metricLine">
-              <span className="muted">Ledger PnL</span>
-              <span className={(row.ledgerPnl ?? 0) >= 0 ? 'mono green' : 'mono red'}>
-                {row.ledgerPnl === null ? '-' : formatCurrency(row.ledgerPnl)}
+              <span className="muted">Paper PnL</span>
+              <span className={(row.paperPnl ?? 0) >= 0 ? 'mono green' : 'mono red'}>
+                {row.paperPnl === null ? '-' : formatCurrency(row.paperPnl)}
               </span>
             </div>
             <div className="metricLine">

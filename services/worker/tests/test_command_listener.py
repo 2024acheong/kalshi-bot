@@ -107,6 +107,20 @@ async def test_clear_kill_switch_calls_deactivate(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_reset_paper_account_command_calls_runtime_reset(monkeypatch) -> None:
+    runtime = MagicMock()
+    listener = make_listener(
+        monkeypatch,
+        runtime,
+        [make_message({"command": "reset_paper_account"})],
+    )
+
+    await listener.listen()
+
+    runtime.reset_paper_account.assert_called_once_with()
+
+
+@pytest.mark.anyio
 async def test_stop_run_calls_runtime_stop_and_listener_stop(monkeypatch) -> None:
     runtime = MagicMock()
     listener = make_listener(
