@@ -233,6 +233,38 @@ def update_paper_account_balances(
     _get_supabase().table("paper_accounts").update(row).eq("id", account_id).execute()
 
 
+def reset_paper_account(
+    account: dict[str, Any],
+    *,
+    run_id: str | None = None,
+    reason: str = "manual_reset",
+) -> None:
+    account_id = str(account["id"])
+    starting_cash = _as_decimal(account.get("starting_cash"), DEFAULT_PAPER_STARTING_CASH)
+    previous_cash = _as_decimal(account.get("cash_balance"))
+    previous_reserved = _as_decimal(account.get("reserved_cash"))
+    update_paper_account_balances(
+        account_id,
+        cash_balance=starting_cash,
+        reserved_cash=Decimal("0"),
+    )
+    insert_paper_ledger_entry(
+        account_id=account_id,
+        run_id=run_id,
+        entry_type="adjustment",
+        amount=starting_cash - previous_cash,
+        cash_balance_after=starting_cash,
+        reserved_cash_after=Decimal("0"),
+        metadata={
+            "reason": reason,
+            "previous_cash_balance": str(previous_cash),
+            "previous_reserved_cash": str(previous_reserved),
+        },
+    )
+    account["cash_balance"] = str(starting_cash)
+    account["reserved_cash"] = "0"
+
+
 def reserve_paper_order_cash(
     *,
     account: dict[str, Any],
@@ -692,6 +724,7 @@ def _resting_order_from_row(row: dict[str, Any]) -> RestingOrder:
     if accumulated_fill_qty is None and remaining_qty is not None:
         accumulated_fill_qty = qty - int(remaining_qty)
     accumulated_fill_qty = int(accumulated_fill_qty or 0)
+    model_prob = metadata.get("model_prob")
 
     intent = OrderIntent(
         ticker=str(row["ticker"]),
@@ -699,7 +732,7 @@ def _resting_order_from_row(row: dict[str, Any]) -> RestingOrder:
         price=Decimal(str(row["price"])),
         qty=qty,
         estimated_edge=float(metadata.get("estimated_edge", 0.0)),
-        model_prob=float(metadata.get("model_prob", row["price"])),
+        model_prob=float(model_prob) if model_prob is not None else None,
         run_id=str(row["run_id"]),
         signal_id=row.get("signal_id"),
     )

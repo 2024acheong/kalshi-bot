@@ -32,6 +32,7 @@ from worker.execution_repository import (
     record_paper_fill_accounting,
     release_paper_order_cash,
     reserve_paper_order_cash,
+    reset_paper_account,
     resting_order_metadata,
     update_order_metadata,
     update_order_status,
@@ -71,6 +72,7 @@ class TradingRuntime:
         self._history: dict[str, list[MarketState]] = {ticker: [] for ticker in tickers}
         self._running = False
         self._paused = False
+        self._active_arbitrage = {}
 
         self._paper_account = (
             paper_account
@@ -411,55 +413,97 @@ class TradingRuntime:
         market: MarketState,
         features: FeatureVector,
     ) -> None:
-        if pair.require_atomic_fill and not self._can_fill_arbitrage_pair(pair, market):
+        ticker = pair.yes_intent.ticker
+        try:
+            if ticker in self._active_arbitrage:
+                return
+
+            self._active_arbitrage[ticker] = pair.pair_id
+
+            tradable_qty = self._tradable_arbitrage_qty(pair, market)
+
+            if pair.require_atomic_fill and tradable_qty == 0:
+                logger.info(
+                    "Spread capture pair %s skipped: insufficient displayed liquidity",
+                    pair.pair_id,
+                )
+                return
+
+            if tradable_qty < pair.yes_intent.qty:
+                pair = replace(
+                    pair,
+                    yes_intent=replace(pair.yes_intent, qty=tradable_qty),
+                    no_intent=replace(pair.no_intent, qty=tradable_qty),
+                )
+
+            yes_fill = await self._process_intent(pair.yes_intent, market, features)
+            no_fill = await self._process_intent(pair.no_intent, market, features)
+            if (
+                self._paper_account is not None
+                and yes_fill is not None
+                and no_fill is not None
+                and yes_fill.fill_qty > 0
+                and no_fill.fill_qty > 0
+            ):
+                locked_qty = min(yes_fill.fill_qty, no_fill.fill_qty)
+                credit_paper_realized_value(
+                    account=self._paper_account,
+                    run_id=self.run_id,
+                    order_id=yes_fill.order_id,
+                    fill_id=None,
+                    ticker=pair.yes_intent.ticker,
+                    side="yes_no_pair",
+                    qty=locked_qty,
+                    reason="spread_capture_hedged_pair",
+                )
+                self._refresh_paper_portfolio_state()
             logger.info(
-                "Spread capture pair %s skipped: both legs must fully fill atomically",
+                "Immediate spread capture pair %s processed: yes_fill=%s no_fill=%s",
                 pair.pair_id,
+                yes_fill.status.value if yes_fill is not None else None,
+                no_fill.status.value if no_fill is not None else None,
             )
-            return
+        finally:
+            self._active_arbitrage.pop(ticker, None)
 
-        yes_fill = await self._process_intent(pair.yes_intent, market, features)
-        no_fill = await self._process_intent(pair.no_intent, market, features)
-        if (
-            self._paper_account is not None
-            and yes_fill is not None
-            and no_fill is not None
-            and yes_fill.fill_qty > 0
-            and no_fill.fill_qty > 0
-        ):
-            locked_qty = min(yes_fill.fill_qty, no_fill.fill_qty)
-            credit_paper_realized_value(
-                account=self._paper_account,
-                run_id=self.run_id,
-                order_id=yes_fill.order_id,
-                fill_id=None,
-                ticker=pair.yes_intent.ticker,
-                side="yes_no_pair",
-                qty=locked_qty,
-                reason="spread_capture_hedged_pair",
-            )
-            self._refresh_paper_portfolio_state()
-        logger.info(
-            "Immediate spread capture pair %s processed: yes_fill=%s no_fill=%s",
-            pair.pair_id,
-            yes_fill.status.value if yes_fill is not None else None,
-            no_fill.status.value if no_fill is not None else None,
-        )
-
-    def _can_fill_arbitrage_pair(
+    def _tradable_arbitrage_qty(
         self,
         pair: SpreadCaptureIntent,
         market: MarketState,
-    ) -> bool:
-        qty = pair.yes_intent.qty
-        if pair.yes_intent.qty != pair.no_intent.qty:
-            return False
+    ) -> int:
         if market.yes_ask is None or market.no_ask is None:
-            return False
+            return 0
 
-        yes_size = market.yes_ask_size if market.yes_ask_size is not None else 0
-        no_size = market.no_ask_size if market.no_ask_size is not None else 0
-        return yes_size >= qty and no_size >= qty
+        yes_size = market.yes_ask_size or 0
+        no_size = market.no_ask_size or 0
+
+        return min(
+            pair.yes_intent.qty,
+            pair.no_intent.qty,
+            yes_size,
+            no_size,
+        )
+
+    def reset_paper_account(self) -> None:
+        if self._paper_account is None:
+            return
+        for position in list(self._open_positions.values()):
+            self._close_position(position.ticker, position)
+        for order in list(self._resting_orders.get_open_orders()):
+            cancelled_order = self._resting_orders.cancel_order(order.order_id)
+            if cancelled_order is None:
+                continue
+            update_order_status(
+                cancelled_order.order_id,
+                OrderIntentStatus.CANCELLED.value,
+            )
+            update_resting_order_state(cancelled_order)
+        reset_paper_account(
+            self._paper_account,
+            run_id=self.run_id,
+            reason="runtime_command",
+        )
+        self._refresh_paper_portfolio_state()
 
     def _submit_resting_order_if_allowed(
         self,

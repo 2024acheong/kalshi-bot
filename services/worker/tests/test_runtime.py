@@ -374,7 +374,11 @@ async def test_runtime_processes_spread_capture_arbitrage_immediately(monkeypatc
         no_bid_size=100,
         no_ask_size=100,
     )
-    strategy = SpreadCaptureStrategy(qty_per_leg=5)
+    strategy = SpreadCaptureStrategy(
+        qty_per_leg=5,
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    )
     strategy.evaluate = MagicMock(return_value=None)
     risk_engine = MagicMock()
     risk_engine.evaluate.side_effect = lambda intent, **kwargs: make_risk_result(
@@ -742,6 +746,57 @@ def test_runtime_loads_paper_account_for_strategy_config(monkeypatch) -> None:
     assert first._portfolio_value_usd == 10000
     assert second._portfolio_value_usd == 5000
     assert second._current_exposure_usd == 250
+
+
+def test_runtime_resets_paper_account(monkeypatch) -> None:
+    market = make_market()
+    account = {
+        "id": "account-1",
+        "starting_cash": "10000.00",
+        "cash_balance": "9500.00",
+        "reserved_cash": "100.00",
+    }
+    reset = MagicMock(
+        side_effect=lambda account, **kwargs: account.update(
+            {"cash_balance": "10000.00", "reserved_cash": "0"}
+        )
+    )
+    monkeypatch.setattr("worker.runtime.reset_paper_account", reset)
+    close_position = MagicMock()
+    update_order_status = MagicMock()
+    update_resting_order_state = MagicMock()
+    monkeypatch.setattr("worker.runtime.close_position", close_position)
+    monkeypatch.setattr("worker.runtime.update_order_status", update_order_status)
+    monkeypatch.setattr("worker.runtime.update_resting_order_state", update_resting_order_state)
+    runtime = make_runtime(paper_account=account)
+    position = MeanReversionPosition(
+        ticker=market.ticker,
+        side="yes",
+        entry_price=Decimal("0.48"),
+        entry_mid_price=Decimal("0.47"),
+        entry_spread_ticks=Decimal("0.02"),
+        qty=10,
+        opened_at=market.timestamp,
+    )
+    runtime._set_position(market.ticker, position)
+    runtime._resting_orders.add_order(
+        intent=make_intent(),
+        max_resting_seconds=30,
+        as_of=market.timestamp,
+        order_id="order-1",
+    )
+
+    runtime.reset_paper_account()
+
+    reset.assert_called_once()
+    assert reset.call_args.kwargs["run_id"] == runtime.run_id
+    close_position.assert_called_once_with(runtime.run_id, market.ticker, "yes")
+    update_order_status.assert_called_once_with("order-1", "cancelled")
+    update_resting_order_state.assert_called_once()
+    assert runtime._open_positions == {}
+    assert runtime._resting_orders.get_open_orders() == []
+    assert runtime._portfolio_value_usd == 10000.0
+    assert runtime._current_exposure_usd == 0.0
 
 
 @pytest.mark.anyio

@@ -60,7 +60,7 @@ def make_features(**kwargs) -> FeatureVector:
 def test_detect_arbitrage_uses_integer_cents_for_fee_rounding() -> None:
     market = make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45"))
 
-    is_arbitrage, locked_profit = detect_implied_probability_arbitrage(market, qty=10)
+    is_arbitrage, locked_profit, total_profit = detect_implied_probability_arbitrage(market, qty=10)
 
     assert is_arbitrage is True
     # 1000c payout - 850c cost - 140c fees = 10c locked profit total -> 0.01/contract
@@ -70,16 +70,17 @@ def test_detect_arbitrage_uses_integer_cents_for_fee_rounding() -> None:
 def test_detect_arbitrage_when_prices_sum_below_one() -> None:
     market = make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45"))
 
-    is_arbitrage, locked_profit = detect_implied_probability_arbitrage(market, qty=10)
+    is_arbitrage, locked_profit, total_profit = detect_implied_probability_arbitrage(market, qty=10)
 
     assert is_arbitrage is True
     assert locked_profit > Decimal("0")
+    assert total_profit > 0
 
 
 def test_no_arbitrage_when_prices_sum_at_or_above_one() -> None:
     market = make_market(yes_ask=Decimal("0.52"), no_ask=Decimal("0.50"))
 
-    is_arbitrage, locked_profit = detect_implied_probability_arbitrage(market, qty=10)
+    is_arbitrage, locked_profit, total_profit = detect_implied_probability_arbitrage(market, qty=10)
 
     assert is_arbitrage is False
     assert locked_profit == Decimal("0")
@@ -88,7 +89,7 @@ def test_no_arbitrage_when_prices_sum_at_or_above_one() -> None:
 def test_no_arbitrage_when_fees_erase_thin_margin() -> None:
     market = make_market(yes_ask=Decimal("0.48"), no_ask=Decimal("0.45"))
 
-    is_arbitrage, locked_profit = detect_implied_probability_arbitrage(market, qty=10)
+    is_arbitrage, locked_profit, total_profit = detect_implied_probability_arbitrage(market, qty=10)
 
     assert is_arbitrage is False
     assert locked_profit == Decimal("0")
@@ -100,11 +101,15 @@ def test_detect_arbitrage_returns_false_on_missing_no_data() -> None:
     assert detect_implied_probability_arbitrage(market, qty=10) == (
         False,
         Decimal("0"),
+        0,
     )
 
 
 def test_evaluate_arbitrage_entry_returns_none_when_no_arbitrage() -> None:
-    result = SpreadCaptureStrategy().evaluate_arbitrage_entry(
+    result = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate_arbitrage_entry(
         make_market(yes_ask=Decimal("0.52"), no_ask=Decimal("0.50")),
         make_features(),
         run_id="run-1",
@@ -116,7 +121,10 @@ def test_evaluate_arbitrage_entry_returns_none_when_no_arbitrage() -> None:
 def test_evaluate_arbitrage_entry_returns_immediate_intents() -> None:
     market = make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45"))
 
-    result = SpreadCaptureStrategy().evaluate_arbitrage_entry(
+    result = SpreadCaptureStrategy(
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate_arbitrage_entry(
         market,
         make_features(),
         run_id="run-1",
@@ -136,7 +144,11 @@ def test_evaluate_arbitrage_entry_returns_immediate_intents() -> None:
 
 
 def test_evaluate_arbitrage_entry_respects_time_to_close() -> None:
-    result = SpreadCaptureStrategy(min_hours_to_close=1.0).evaluate_arbitrage_entry(
+    result = SpreadCaptureStrategy(
+        min_hours_to_close=1.0,
+        min_profit_cents_total=0,
+        min_profit_per_contract=0,
+    ).evaluate_arbitrage_entry(
         make_market(yes_ask=Decimal("0.40"), no_ask=Decimal("0.45")),
         make_features(time_to_close_hours=0.25),
         run_id="run-1",

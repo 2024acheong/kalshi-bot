@@ -22,6 +22,7 @@ from worker.execution_repository import (
     record_paper_fill_accounting,
     release_paper_order_cash,
     reserve_paper_order_cash,
+    reset_paper_account,
 )
 from core.execution.adapters import FillResult
 from core.risk.engine import OrderIntent
@@ -403,6 +404,29 @@ def test_record_paper_fill_accounting_debits_cash_and_fees(monkeypatch) -> None:
         "fill_debit",
         "fill_fee",
     ]
+
+
+def test_reset_paper_account_restores_starting_cash(monkeypatch) -> None:
+    fake = FakeSupabase()
+    fake.tables["paper_accounts"] = FakeTable(response_id="account-1")
+    fake.tables["paper_ledger_entries"] = FakeTable(response_id="ledger-1")
+    monkeypatch.setattr("worker.execution_repository._get_supabase", lambda: fake)
+    account = {
+        "id": "account-1",
+        "starting_cash": "10000.00",
+        "cash_balance": "9420.50",
+        "reserved_cash": "125.00",
+    }
+
+    reset_paper_account(account, run_id="run-1", reason="test_reset")
+
+    assert account["cash_balance"] == "10000.00"
+    assert account["reserved_cash"] == "0"
+    assert fake.tables["paper_accounts"].update_calls[0]["cash_balance"] == "10000.00"
+    ledger_row = fake.tables["paper_ledger_entries"].insert_calls[0]
+    assert ledger_row["entry_type"] == "adjustment"
+    assert ledger_row["amount"] == "579.50"
+    assert ledger_row["metadata_json"]["reason"] == "test_reset"
 
 
 def test_close_position_zeroes_qty(monkeypatch) -> None:

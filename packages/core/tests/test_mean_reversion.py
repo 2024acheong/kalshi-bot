@@ -133,16 +133,7 @@ def test_fade_downward_momentum_buys_yes_side() -> None:
     assert intent.estimated_edge == 0.05
 
 
-def test_exit_when_no_bid_hits_profit_target() -> None:
-    # intent = MeanReversionStrategy().evaluate_exit(
-    #     make_position(side="no", entry_mid_price=Decimal("0.50")),
-    #     make_market(yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"),
-    #         no_bid=Decimal("0.53"), no_ask=Decimal("0.55")),
-    #     as_of=BASE_TIME + timedelta(minutes=5),
-    # )
-
-    # assert intent is not None
-    # assert intent.is_closing_order is True
+def test_exit_when_complement_ask_hits_profit_target() -> None:
     position = make_position(
         side="no",
         entry_price=Decimal("0.51"),
@@ -150,14 +141,14 @@ def test_exit_when_no_bid_hits_profit_target() -> None:
     )
 
     market = make_market(
-        no_bid=Decimal("0.52"),
-        no_ask=Decimal("0.54"),
+        yes_ask=Decimal("0.47"),
     )
 
     intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
 
     assert intent is not None
-    assert intent.price == Decimal("0.52")
+    assert intent.side == "yes"
+    assert intent.price == Decimal("0.47")
 
 
 def test_exit_on_stop_loss_no_side() -> None:
@@ -167,10 +158,7 @@ def test_exit_on_stop_loss_no_side() -> None:
         entry_spread_ticks=Decimal("0.02"),
     )
 
-    market = make_market(
-        no_bid=Decimal("0.46"),
-        no_ask=Decimal("0.48"),
-    )
+    market = make_market(yes_ask=Decimal("0.53"))
 
     intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
 
@@ -200,35 +188,33 @@ def test_exit_on_stop_loss_when_executable_price_spikes() -> None:
             entry_mid_price=Decimal("0.45"),
             entry_spread_ticks=Decimal("0.02"),
         ),
-        make_market(yes_bid=Decimal("0.10"), yes_ask=Decimal("0.80"),
-            no_bid=Decimal("0.10"), no_ask=Decimal("0.15")),
+        make_market(yes_ask=Decimal("0.80")),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
     assert intent is not None
-    assert intent.price == Decimal("0.10")
+    assert intent.price == Decimal("0.80")
 
 
-def test_closing_intent_has_same_side() -> None:
+def test_closing_intent_buys_opposite_side() -> None:
     strategy = MeanReversionStrategy()
     no_exit = strategy.evaluate_exit(
         make_position(side="no", entry_mid_price=Decimal("0.50")),
         make_market(
-            yes_bid=Decimal("0.47"), yes_ask=Decimal("0.49"),
-            no_bid=Decimal("0.53"), no_ask=Decimal("0.55"),
+            yes_ask=Decimal("0.47"),
         ),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
     yes_exit = strategy.evaluate_exit(
         make_position(side="yes", entry_mid_price=Decimal("0.50")),
-        make_market(yes_bid=Decimal("0.51"), yes_ask=Decimal("0.53")),
+        make_market(no_ask=Decimal("0.47")),
         as_of=BASE_TIME + timedelta(minutes=5),
     )
 
     assert no_exit is not None
-    assert no_exit.side == "no"
+    assert no_exit.side == "yes"
     assert yes_exit is not None
-    assert yes_exit.side == "yes"
+    assert yes_exit.side == "no"
 
 def test_no_exit_at_break_even() -> None:
     position = make_position(
@@ -238,8 +224,7 @@ def test_no_exit_at_break_even() -> None:
     )
 
     market = make_market(
-        no_bid=Decimal("0.51"),
-        no_ask=Decimal("0.53"),
+        yes_ask=Decimal("0.49"),
     )
 
     intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
@@ -254,8 +239,7 @@ def test_yes_exit_profit_target() -> None:
     )
 
     market = make_market(
-        yes_bid=Decimal("0.52"),
-        yes_ask=Decimal("0.54"),
+        no_ask=Decimal("0.47"),
     )
 
     intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
@@ -270,8 +254,7 @@ def test_profit_requires_more_than_entry_price() -> None:
     )
 
     market = make_market(
-        no_bid=Decimal("0.515"),
-        no_ask=Decimal("0.535"),
+        yes_ask=Decimal("0.485"),
     )
 
     intent = MeanReversionStrategy().evaluate_exit(position, market, as_of=BASE_TIME + timedelta(minutes=5))
