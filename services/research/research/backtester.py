@@ -19,8 +19,7 @@ from core.strategies.event_drift import EventDriftPosition, EventDriftStrategy
 from core.strategies.mean_reversion import MeanReversionPosition, MeanReversionStrategy
 from core.strategies.spread_capture import SpreadCaptureIntent
 from research import data_loader
-from research.metrics import BacktestMetrics, compute_metrics
-from dataclasses import replace
+from research.metrics import compute_metrics
 
 
 @dataclass
@@ -30,6 +29,7 @@ class BacktestConfig:
     date_to: datetime
     history_window: int = 20
     starting_portfolio_usd: float = 1000.0
+    resolved_outcomes: dict[str, bool] | None = None
 
 
 class Backtester:
@@ -86,6 +86,8 @@ class Backtester:
                     fill_result,
                     order.intent.model_prob,
                     order.intent.side,
+                    replay_market,
+                    order.intent.is_closing_order,
                 )
                 fills.append(fill)
                 if (
@@ -206,7 +208,7 @@ class Backtester:
 
                 if risk_result.decision == RiskDecision.REDUCE_ONLY:
                     # construct a reduced-qty version of the intent before submitting
-                    intent = replace(intent, qty=result.approved_qty)
+                    order_intent = replace(order_intent, qty=risk_result.approved_qty)
                 fill_result = self.paper_adapter.submit_order(
                     order_id=f"backtest-order-{index:08d}-{leg_index}",
                     intent=order_intent,
@@ -214,7 +216,11 @@ class Backtester:
                     market=replay_market,
                 )
                 fill = self._serialize_fill(
-                    fill_result, order_intent.model_prob, order_intent.side
+                    fill_result,
+                    order_intent.model_prob,
+                    order_intent.side,
+                    replay_market,
+                    order_intent.is_closing_order,
                 )
                 fills.append(fill)
 
@@ -230,8 +236,19 @@ class Backtester:
                         daily_pnl_by_date,
                     )
 
-        daily_pnl_series = [daily_pnl_by_date[date] for date in sorted(daily_pnl_by_date)]
-        metrics = compute_metrics(fills, daily_pnl_series)
+        outcomes = self.config.resolved_outcomes
+        if outcomes is None:
+            outcomes = data_loader.get_resolved_outcomes(self.config.tickers)
+        resolved_trades, resolved_daily_pnl, unresolved_trades = self._settle_fills(
+            fills,
+            outcomes,
+        )
+        metrics = compute_metrics(
+            fills,
+            resolved_daily_pnl,
+            resolved_trades=resolved_trades,
+            unresolved_trades=unresolved_trades,
+        )
         return {
             "config": self._serialize_config(),
             "total_events": len(timeline),
@@ -277,8 +294,10 @@ class Backtester:
     def _serialize_fill(
         self,
         fill_result: FillResult,
-        model_prob: float,
+        model_prob: float | None,
         side: str,
+        market: MarketState | None = None,
+        is_closing_order: bool = False,
     ) -> dict[str, Any]:
         return {
             "order_id": fill_result.order_id,
@@ -290,7 +309,93 @@ class Backtester:
             "status": fill_result.status.value,
             "side": side,
             "model_prob": model_prob,
+            "ticker": market.ticker if market is not None else None,
+            "timestamp": market.timestamp.isoformat() if market is not None else None,
+            "is_closing_order": is_closing_order,
         }
+
+    def _settle_fills(
+        self,
+        fills: list[dict[str, Any]],
+        outcomes: dict[str, bool],
+    ) -> tuple[list[dict[str, Any]], list[float], int]:
+        """Reconcile exits and settle remaining contracts at their outcomes."""
+        positions: dict[tuple[str, str], dict[str, Any]] = {}
+        resolved_trades: list[dict[str, Any]] = []
+        unresolved = 0
+
+        for fill in fills:
+            qty = int(fill.get("fill_qty", 0))
+            ticker = fill.get("ticker")
+            side = str(fill.get("side"))
+            if qty <= 0 or not ticker:
+                continue
+            price = Decimal(str(fill["fill_price"]))
+            fee = Decimal(str(fill.get("fee", 0)))
+            key = (str(ticker), side)
+
+            if not fill.get("is_closing_order"):
+                state = positions.setdefault(
+                    key,
+                    {
+                        "qty": 0,
+                        "cost": Decimal("0"),
+                        "fees": Decimal("0"),
+                        "model_prob": fill.get("model_prob"),
+                        "date": str(fill.get("timestamp", ""))[:10],
+                    },
+                )
+                state["qty"] += qty
+                state["cost"] += price * qty
+                state["fees"] += fee
+                if state["model_prob"] is None:
+                    state["model_prob"] = fill.get("model_prob")
+                continue
+
+            entry_key = (str(ticker), "no" if side == "yes" else "yes")
+            state = positions.get(entry_key)
+            if state is None or state["qty"] <= 0:
+                unresolved += qty
+                continue
+            matched = min(qty, state["qty"])
+            entry_price = state["cost"] / state["qty"]
+            entry_fee = state["fees"] * Decimal(matched) / Decimal(state["qty"])
+            pnl = Decimal(matched) * (Decimal("1") - entry_price - price) - entry_fee - fee
+            resolved_trades.append(
+                {
+                    "pnl": pnl,
+                    "outcome": None,
+                    "model_prob": state["model_prob"],
+                    "date": str(fill.get("timestamp", ""))[:10],
+                }
+            )
+            state["qty"] -= matched
+            state["cost"] -= entry_price * matched
+            state["fees"] -= entry_fee
+
+        for (ticker, side), state in positions.items():
+            if state["qty"] <= 0:
+                continue
+            if ticker not in outcomes:
+                unresolved += state["qty"]
+                continue
+            yes_wins = bool(outcomes[ticker])
+            payout = Decimal("1") if (side == "yes") == yes_wins else Decimal("0")
+            entry_price = state["cost"] / state["qty"]
+            resolved_trades.append(
+                {
+                    "pnl": state["qty"] * (payout - entry_price) - state["fees"],
+                    "outcome": 1.0 if yes_wins else 0.0,
+                    "model_prob": state["model_prob"],
+                    "date": state["date"],
+                }
+            )
+
+        daily_pnl: dict[str, float] = defaultdict(float)
+        for trade in resolved_trades:
+            if trade["date"]:
+                daily_pnl[trade["date"]] += float(trade["pnl"])
+        return resolved_trades, [daily_pnl[key] for key in sorted(daily_pnl)], unresolved
 
     def _apply_fill_pnl(
         self,
@@ -300,12 +405,9 @@ class Backtester:
         daily_realized_pnl_usd: float,
         daily_pnl_by_date: dict[str, float],
     ) -> tuple[float, float]:
-        notional = fill_result.fill_qty * float(fill_result.fill_price)
-        fee = float(fill_result.fee)
-        current_exposure_usd += notional
-        pnl_proxy = notional - fee
-        daily_realized_pnl_usd += pnl_proxy
-        daily_pnl_by_date[market.timestamp.date().isoformat()] += pnl_proxy
+        current_exposure_usd += fill_result.fill_qty * float(fill_result.fill_price)
+        # A fill is cash deployment, not realized P&L. Settlement is calculated
+        # after entries and exits are reconciled with resolved outcomes.
         return current_exposure_usd, daily_realized_pnl_usd
 
     def _process_mean_reversion_event(
@@ -375,7 +477,15 @@ class Backtester:
             order_type="market",
             market=market,
         )
-        fills.append(self._serialize_fill(fill_result, intent.model_prob, intent.side))
+        fills.append(
+            self._serialize_fill(
+                fill_result,
+                intent.model_prob,
+                intent.side,
+                market,
+                intent.is_closing_order,
+            )
+        )
         if fill_result.fill_qty > 0:
             current_exposure_usd, daily_realized_pnl_usd = self._apply_fill_pnl(
                 fill_result,
@@ -477,7 +587,15 @@ class Backtester:
             order_type="market",
             market=market,
         )
-        fills.append(self._serialize_fill(fill_result, intent.model_prob, intent.side))
+        fills.append(
+            self._serialize_fill(
+                fill_result,
+                intent.model_prob,
+                intent.side,
+                market,
+                intent.is_closing_order,
+            )
+        )
         if fill_result.fill_qty > 0:
             current_exposure_usd, daily_realized_pnl_usd = self._apply_fill_pnl(
                 fill_result,
@@ -583,7 +701,15 @@ class Backtester:
             order_type="market",
             market=market,
         )
-        fills.append(self._serialize_fill(fill_result, intent.model_prob, intent.side))
+        fills.append(
+            self._serialize_fill(
+                fill_result,
+                intent.model_prob,
+                intent.side,
+                market,
+                intent.is_closing_order,
+            )
+        )
         if fill_result.fill_qty > 0:
             current_exposure_usd, daily_realized_pnl_usd = self._apply_fill_pnl(
                 fill_result,

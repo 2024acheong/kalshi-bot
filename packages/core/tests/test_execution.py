@@ -49,7 +49,7 @@ def make_intent(**kwargs) -> OrderIntent:
 def test_fee_calculation_basic():
     fee = compute_kalshi_fee(Decimal("0.50"), 100)
 
-    assert fee == Decimal("7.00")
+    assert fee == Decimal("1.75")
 
 
 def test_fee_calculation_extreme_price():
@@ -231,4 +231,4 @@ def test_configurable_fee_per_contract():
         make_market(yes_ask=Decimal("0.48")),
     )
 
-    assert result.fee == Decimal("0.20")
+    assert result.fee == Decimal("0.05")

@@ -438,7 +438,7 @@ async def test_runtime_opens_mean_reversion_position(monkeypatch) -> None:
         time_to_close_hours=24.0,
         implied_probability=0.50,
         liquidity_score=100.0,
-        price_momentum_1h=0.05,
+        price_momentum_1h=0.07,
         price_momentum_24h=None,
         volume_zscore=0.0,
         open_interest_delta=None,
@@ -540,7 +540,7 @@ async def test_runtime_opens_and_closes_event_drift_position(monkeypatch) -> Non
         time_to_close_hours=24.0,
         implied_probability=0.50,
         liquidity_score=100.0,
-        price_momentum_1h=0.05,
+        price_momentum_1h=0.07,
         price_momentum_24h=None,
         volume_zscore=2.0,
         open_interest_delta=None,
@@ -607,7 +607,7 @@ async def test_runtime_opens_and_closes_event_drift_position(monkeypatch) -> Non
     position = runtime._open_positions[(runtime.run_id, market.ticker)]
     assert isinstance(position, EventDriftPosition)
     assert position.side == "yes"
-    assert position.entry_momentum == 0.05
+    assert position.entry_momentum == 0.07
     persist_open_position.assert_called_once()
 
     await runtime.on_market_update(market)

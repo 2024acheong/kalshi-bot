@@ -80,6 +80,32 @@ def get_close_times(tickers: list[str]) -> dict[str, datetime | None]:
     return close_times
 
 
+def get_resolved_outcomes(tickers: list[str]) -> dict[str, bool]:
+    """Load resolved YES outcomes used to settle replay positions."""
+    outcomes: dict[str, bool] = {}
+    if not tickers:
+        return outcomes
+
+    try:
+        client = get_supabase_client()
+    except Exception:
+        return outcomes
+    for table in ("weather_market_outcomes", "macro_market_outcomes"):
+        try:
+            response = (
+                client.table(table)
+                .select("ticker,yes_resolved")
+                .in_("ticker", tickers)
+                .execute()
+            )
+        except Exception:
+            continue
+        for row in getattr(response, "data", None) or []:
+            if row.get("ticker") is not None and row.get("yes_resolved") is not None:
+                outcomes[str(row["ticker"])] = bool(row["yes_resolved"])
+    return outcomes
+
+
 def load_snapshots(
     tickers: list[str],
     date_from: datetime,
