@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 from collections import defaultdict
@@ -353,6 +354,15 @@ def train_weather_model() -> dict[str, Any]:
 
     synthetic_placeholder = real_training_rows is None
     if real_training_rows is None:
+        if os.getenv("ALLOW_SYNTHETIC_MODEL_TRAINING", "false").lower() not in {
+            "1",
+            "true",
+            "yes",
+        }:
+            raise RuntimeError(
+                "Refusing to register a weather model without resolved outcomes. "
+                "Set ALLOW_SYNTHETIC_MODEL_TRAINING=true only for development."
+            )
         x_values, y_values = _synthetic_training_rows(base_features)
     else:
         x_values, y_values = real_training_rows

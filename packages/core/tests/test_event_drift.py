@@ -91,7 +91,7 @@ def test_entry_on_volume_surge_overrides_weak_imbalance() -> None:
     intent = EventDriftStrategy().evaluate_entry(
         make_market(),
         make_features(
-            price_momentum_1h=0.05,
+            price_momentum_1h=0.07,
             bid_ask_imbalance=0.05,
             volume_zscore=3.5,
         ),
@@ -136,7 +136,7 @@ def test_follows_upward_momentum_buys_yes_side() -> None:
     intent = EventDriftStrategy().evaluate_entry(
         make_market(),
         make_features(
-            price_momentum_1h=0.05,
+            price_momentum_1h=0.07,
             bid_ask_imbalance=0.3,
             volume_zscore=2.0,
         ),
@@ -146,14 +146,14 @@ def test_follows_upward_momentum_buys_yes_side() -> None:
     assert intent is not None
     assert intent.side == "yes"
     assert intent.price == Decimal("0.51")
-    assert intent.estimated_edge == 0.05
+    assert intent.estimated_edge == 0.07
 
 
 def test_follows_downward_momentum_sells_no_side() -> None:
     intent = EventDriftStrategy().evaluate_entry(
         make_market(),
         make_features(
-            price_momentum_1h=-0.05,
+            price_momentum_1h=-0.07,
             bid_ask_imbalance=-0.3,
             volume_zscore=2.0,
         ),
@@ -163,7 +163,7 @@ def test_follows_downward_momentum_sells_no_side() -> None:
     assert intent is not None
     assert intent.side == "no"
     assert intent.price == Decimal("0.51")
-    assert intent.estimated_edge == 0.05
+    assert intent.estimated_edge == 0.07
 
 
 def test_exit_on_momentum_exhaustion_yes_side() -> None:

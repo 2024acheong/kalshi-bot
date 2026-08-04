@@ -545,7 +545,7 @@ def test_estimator_clips_output_to_valid_range(monkeypatch) -> None:
     monkeypatch.setattr("services.models.weather.estimator.get_recent_models", lambda name: [])
     estimator = WeatherEnsembleEstimator()
     estimator.model = FakeModel()
-    monkeypatch.setattr(estimator, "_fetch_latest_ensemble_rows", lambda parsed: rows)
+    monkeypatch.setattr(estimator, "_fetch_latest_ensemble_rows", lambda parsed, as_of: rows)
     monkeypatch.setattr(estimator, "_resolve_threshold_strike_type", lambda ticker: "greater")
 
     assert estimator.estimate(make_market("KXHIGHMIA-26MAR24-T80"), make_features()) == 0.99

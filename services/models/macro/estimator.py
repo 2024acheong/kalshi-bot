@@ -136,9 +136,7 @@ class MacroEstimator(ProbabilityEstimator):
         return compute_threshold_model_features(
             metric_observations,
             threshold=float(parsed["threshold"]),
-            cutoff_date=(
-                metric_observations[-1][0] if metric_observations else parsed["target_date"]
-            ),
+            cutoff_date=min(parsed["target_date"], as_of.astimezone(timezone.utc).date()),
             as_of=as_of,
         )
 

@@ -19,7 +19,10 @@ def compute_kalshi_fee(
 ) -> Decimal:
     if fill_price <= 0 or fill_price >= 1 or fill_qty <= 0:
         return Decimal("0")
-    total_fee = (fee_per_contract * Decimal(fill_qty)).quantize(
+    # Kalshi's taker fee scales with the binary-contract variance p(1-p), so a
+    # flat per-contract fee materially misprices trades near 0 or 1.
+    price_factor = fill_price * (Decimal("1") - fill_price)
+    total_fee = (fee_per_contract * price_factor * Decimal(fill_qty)).quantize(
         Decimal("0.01"),
         rounding=ROUND_HALF_UP,
     )

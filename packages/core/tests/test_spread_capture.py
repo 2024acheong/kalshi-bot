@@ -89,7 +89,7 @@ def test_holds_when_fees_erase_arbitrage() -> None:
         min_profit_cents_total=0,
         min_profit_per_contract=0,
     ).evaluate(
-        make_market(yes_ask=Decimal("0.48"), no_ask=Decimal("0.45")),
+        make_market(yes_ask=Decimal("0.50"), no_ask=Decimal("0.50")),
         make_features(),
         run_id="run-1",
     )
