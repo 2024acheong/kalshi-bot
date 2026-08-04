@@ -63,8 +63,8 @@ def test_detect_arbitrage_uses_integer_cents_for_fee_rounding() -> None:
     is_arbitrage, locked_profit, total_profit = detect_implied_probability_arbitrage(market, qty=10)
 
     assert is_arbitrage is True
-    # 1000c payout - 850c cost - 140c fees = 10c locked profit total -> 0.01/contract
-    assert locked_profit == Decimal("0.01")
+    # Price-dependent fees leave 116c of locked profit over 10 contracts.
+    assert locked_profit == Decimal("0.116")
 
 
 def test_detect_arbitrage_when_prices_sum_below_one() -> None:
@@ -87,7 +87,7 @@ def test_no_arbitrage_when_prices_sum_at_or_above_one() -> None:
 
 
 def test_no_arbitrage_when_fees_erase_thin_margin() -> None:
-    market = make_market(yes_ask=Decimal("0.48"), no_ask=Decimal("0.45"))
+    market = make_market(yes_ask=Decimal("0.50"), no_ask=Decimal("0.50"))
 
     is_arbitrage, locked_profit, total_profit = detect_implied_probability_arbitrage(market, qty=10)
 

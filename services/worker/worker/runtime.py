@@ -436,6 +436,55 @@ class TradingRuntime:
                     no_intent=replace(pair.no_intent, qty=tradable_qty),
                 )
 
+            # Evaluate both legs before submitting either one. Sequential risk
+            # checks can otherwise leave a supposedly atomic pair half-hedged.
+            yes_result = self.risk_engine.evaluate(
+                intent=pair.yes_intent,
+                market=market,
+                features=features,
+                open_positions=[],
+                market_category=None,
+                portfolio_value_usd=self._portfolio_value_usd,
+                current_exposure_usd=self._current_exposure_usd,
+                daily_realized_pnl_usd=self._daily_realized_pnl_usd,
+                kill_switch_active=self._kill_switch_active,
+                global_kill_switch=self._global_kill_switch,
+            )
+            no_result = self.risk_engine.evaluate(
+                intent=pair.no_intent,
+                market=market,
+                features=features,
+                open_positions=[],
+                market_category=None,
+                portfolio_value_usd=self._portfolio_value_usd,
+                current_exposure_usd=self._current_exposure_usd
+                + pair.yes_intent.qty * float(pair.yes_intent.price),
+                daily_realized_pnl_usd=self._daily_realized_pnl_usd,
+                kill_switch_active=self._kill_switch_active,
+                global_kill_switch=self._global_kill_switch,
+            )
+            if yes_result.decision == RiskDecision.BLOCK or no_result.decision == RiskDecision.BLOCK:
+                logger.info(
+                    "Spread capture pair %s rejected before submission: yes=%s no=%s",
+                    pair.pair_id,
+                    yes_result.blocked_by,
+                    no_result.blocked_by,
+                )
+                return
+            if self._paper_account is not None:
+                cash_available = Decimal(str(self._paper_account.get("cash_balance", "0"))) - Decimal(
+                    str(self._paper_account.get("reserved_cash", "0"))
+                )
+                required_cash = estimate_order_cash(pair.yes_intent) + estimate_order_cash(
+                    pair.no_intent
+                )
+                if cash_available < required_cash:
+                    logger.info(
+                        "Spread capture pair %s rejected before submission: insufficient pair cash",
+                        pair.pair_id,
+                    )
+                    return
+
             yes_fill = await self._process_intent(pair.yes_intent, market, features)
             no_fill = await self._process_intent(pair.no_intent, market, features)
             if (

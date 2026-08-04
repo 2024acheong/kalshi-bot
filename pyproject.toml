@@ -13,7 +13,6 @@ testpaths = [
   "services/research/tests",
   "services/models/tests"
 ]
-asyncio_mode = "auto"
 addopts = ["--import-mode=importlib"]
 
 [tool.ruff]

@@ -150,7 +150,11 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
             "upper_f": upper_f,
         }
 
-    def _fetch_latest_ensemble_rows(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    def _fetch_latest_ensemble_rows(
+        self,
+        parsed: dict[str, Any],
+        as_of: datetime,
+    ) -> list[dict[str, Any]]:
         start = parsed["target_datetime"]
         end = start + timedelta(days=1)
         response = (
@@ -161,6 +165,7 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
             .eq("location_lon", round(parsed["location_lon"], 3))
             .gte("target_datetime", start.isoformat())
             .lt("target_datetime", end.isoformat())
+            .lte("forecast_issued_at", as_of.astimezone(timezone.utc).isoformat())
             .order("forecast_issued_at", desc=True)
             .limit(1000)
             .execute()
@@ -239,7 +244,7 @@ class WeatherEnsembleEstimator(ProbabilityEstimator):
                 LOGGER.info("weather_estimator_skip ticker=%s reason=parse_failed", market.ticker)
                 return None
 
-            rows = self._fetch_latest_ensemble_rows(parsed)
+            rows = self._fetch_latest_ensemble_rows(parsed, features.timestamp)
             if not rows:
                 LOGGER.info(
                     "weather_estimator_skip ticker=%s reason=missing_ensemble_rows parsed=%s",

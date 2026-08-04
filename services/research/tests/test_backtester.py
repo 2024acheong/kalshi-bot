@@ -123,6 +123,19 @@ def test_backtest_produces_fills_on_favorable_conditions(monkeypatch) -> None:
     assert result["metrics"].total_trades >= 1
 
 
+def test_backtest_settles_open_contracts_from_resolved_outcome(monkeypatch) -> None:
+    snapshots = [make_market(index) for index in range(2)]
+    patch_loader(monkeypatch, snapshots)
+    config = make_config()
+    config.resolved_outcomes = {"KXTEST-26JAN-YES": True}
+
+    result = Backtester(DummyStrategy(), RiskEngine(), PaperAdapter(), config).run()
+
+    assert result["metrics"].total_pnl is not None
+    assert result["metrics"].resolved_trades == 1
+    assert result["metrics"].unresolved_trades == 0
+
+
 def test_backtest_handles_spread_capture_pair(monkeypatch) -> None:
     snapshots = [
         make_market(
@@ -226,7 +239,7 @@ def test_backtest_tracks_event_drift_entry_and_exit(monkeypatch) -> None:
     patch_loader(monkeypatch, snapshots)
 
     def feature_for(market: MarketState, history: list[MarketState]) -> FeatureVector:
-        momentum = 0.05 if market.raw_sequence == 0 else 0.01
+        momentum = 0.07 if market.raw_sequence == 0 else 0.01
         return FeatureVector(
             ticker="KXTEST-26JAN-YES",
             timestamp=market.timestamp,
@@ -332,13 +345,38 @@ def test_metrics_computation_basic() -> None:
             },
         ],
         daily_pnl_series=[1.0, -0.5, 2.0],
+        resolved_trades=[
+            {"pnl": 0.25, "outcome": 1.0, "model_prob": 0.53},
+            {"pnl": -0.10, "outcome": 0.0, "model_prob": 0.56},
+        ],
     )
 
     assert isinstance(metrics, BacktestMetrics)
     assert metrics.total_trades == 2
+    assert metrics.total_pnl == pytest.approx(0.15)
     assert metrics.total_fees == pytest.approx(0.15)
     assert metrics.max_drawdown == pytest.approx(0.5)
     assert metrics.sharpe is not None
     assert not math.isnan(metrics.sharpe)
     assert metrics.hit_rate is not None
     assert metrics.brier_score is not None
+
+
+def test_metrics_do_not_invent_pnl_without_resolution() -> None:
+    metrics = compute_metrics(
+        fills=[
+            {
+                "fill_price": Decimal("0.48"),
+                "fill_qty": 10,
+                "fee": Decimal("0.10"),
+                "side": "yes",
+                "model_prob": 0.53,
+            }
+        ],
+        daily_pnl_series=[],
+    )
+
+    assert metrics.total_pnl is None
+    assert metrics.hit_rate is None
+    assert metrics.brier_score is None
+    assert metrics.unresolved_trades == 0

@@ -66,8 +66,9 @@ class EventDriftStrategy:
         if reference_price is None or reference_price <= 0:
             return None
 
-        relative_momentum = abs(momentum) / reference_price
-        if relative_momentum < self.momentum_threshold:
+        # compute_price_momentum already returns a relative return. Dividing by
+        # the contract price again made the threshold price-dependent.
+        if abs(momentum) < self.momentum_threshold:
             return None
 
         imbalance = features.bid_ask_imbalance
