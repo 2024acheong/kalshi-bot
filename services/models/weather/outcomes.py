@@ -23,6 +23,9 @@ NWS_API_BASE = "https://api.weather.gov"
 NWS_USER_AGENT = "kalshi-bot-weather-outcomes/0.1"
 NCEI_DATA_SERVICE_URL = "https://www.ncei.noaa.gov/access/services/data/v1"
 NCEI_SOURCE = "ncei_daily_summaries"
+NCEI_RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+NCEI_RETRY_ATTEMPTS = 3
+NCEI_RETRY_BASE_DELAY_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -281,7 +284,27 @@ async def fetch_ncei_daily_summary_outcomes(
         "endDate": end_date.isoformat(),
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.get(NCEI_DATA_SERVICE_URL, params=params)
+        response: httpx.Response | None = None
+        for attempt in range(NCEI_RETRY_ATTEMPTS + 1):
+            response = await client.get(NCEI_DATA_SERVICE_URL, params=params)
+            if response.status_code not in NCEI_RETRY_STATUS_CODES:
+                break
+            if attempt >= NCEI_RETRY_ATTEMPTS:
+                break
+            delay = _retry_after_seconds(response) or (
+                NCEI_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
+            )
+            LOGGER.warning(
+                "NCEI returned %s for %s from %s to %s; retrying in %.1fs",
+                response.status_code,
+                city_code,
+                start_date,
+                end_date,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        if response is None:
+            return []
         response.raise_for_status()
         rows = response.json()
 
@@ -296,6 +319,16 @@ async def fetch_ncei_daily_summary_outcomes(
         if outcome is not None
     ]
     return sorted(outcomes, key=lambda outcome: outcome.outcome_date)
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        return None
 
 
 def store_temperature_outcome(outcome: WeatherOutcome) -> int:
@@ -428,7 +461,30 @@ async def backfill_ncei_daily_summary_outcomes(
 
     stored = 0
     for chunk_start, chunk_end in chunk_date_range_by_year(resolved_start, resolved_end):
-        outcomes = await fetch_ncei_daily_summary_outcomes(city_code, chunk_start, chunk_end)
+        try:
+            outcomes = await fetch_ncei_daily_summary_outcomes(
+                city_code,
+                chunk_start,
+                chunk_end,
+            )
+        except httpx.HTTPStatusError as exc:
+            LOGGER.warning(
+                "Skipping NCEI daily-summaries outcomes for %s from %s to %s after HTTP %s",
+                city_code,
+                chunk_start,
+                chunk_end,
+                exc.response.status_code,
+            )
+            continue
+        except (httpx.RequestError, ValueError, RuntimeError) as exc:
+            LOGGER.warning(
+                "Skipping NCEI daily-summaries outcomes for %s from %s to %s after error: %s",
+                city_code,
+                chunk_start,
+                chunk_end,
+                exc,
+            )
+            continue
         for outcome in outcomes:
             stored += store_temperature_outcome(outcome)
         LOGGER.info(

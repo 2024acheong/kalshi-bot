@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import httpx
 import pytest
 
 from core.schemas.market import FeatureVector, MarketState, MarketStatus
@@ -19,6 +20,7 @@ from services.models.weather.market_outcomes import (
     store_weather_market_outcome,
 )
 from services.models.weather.outcomes import (
+    backfill_ncei_daily_summary_outcomes,
     chunk_date_range_by_year,
     parse_ncei_daily_summary_outcome,
     parse_nws_cli_outcome,
@@ -189,6 +191,38 @@ def test_chunk_date_range_by_year_splits_multi_year_ranges() -> None:
 def test_chunk_date_range_by_year_rejects_invalid_ranges() -> None:
     with pytest.raises(ValueError, match="start_date"):
         chunk_date_range_by_year(date(2026, 1, 2), date(2026, 1, 1))
+
+
+@pytest.mark.anyio
+async def test_backfill_ncei_daily_summary_outcomes_skips_transient_http_error(
+    monkeypatch,
+) -> None:
+    request = httpx.Request("GET", "https://www.ncei.noaa.gov/access/services/data/v1")
+    response = httpx.Response(503, request=request)
+
+    async def raise_503(city_code, start_date, end_date):
+        raise httpx.HTTPStatusError(
+            "Server error",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr(
+        "services.models.weather.outcomes.fetch_ncei_daily_summary_outcomes",
+        raise_503,
+    )
+    monkeypatch.setattr(
+        "services.models.weather.outcomes.store_temperature_outcome",
+        lambda outcome: pytest.fail("should not store skipped outcomes"),
+    )
+
+    stored = await backfill_ncei_daily_summary_outcomes(
+        "NYC",
+        date(2025, 8, 15),
+        date(2025, 12, 31),
+    )
+
+    assert stored == 0
 
 
 def test_store_temperature_outcome_uses_outcome_source(monkeypatch) -> None:
