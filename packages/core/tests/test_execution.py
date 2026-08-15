@@ -79,7 +79,7 @@ def test_limit_order_fills_when_price_crossed():
     assert result.fill_qty == 100
 
 
-def test_limit_order_does_not_fill_on_touch():
+def test_limit_order_fills_on_touch():
     result = PaperAdapter().submit_order(
         "order-1",
         make_intent(price=Decimal("0.48")),
@@ -87,8 +87,9 @@ def test_limit_order_does_not_fill_on_touch():
         make_market(yes_ask=Decimal("0.48")),
     )
 
-    assert result.status == OrderIntentStatus.CANCELLED
-    assert result.fill_qty == 0
+    assert result.status == OrderIntentStatus.FILLED
+    assert result.fill_price == Decimal("0.48")
+    assert result.fill_qty == 100
 
 
 def test_limit_order_does_not_fill_when_price_not_crossed():
@@ -181,7 +182,7 @@ def test_no_side_limit_order_logic():
     assert result.fill_qty == 100
 
 
-def test_no_side_limit_order_does_not_fill_on_touch():
+def test_no_side_limit_order_fills_on_touch():
     result = PaperAdapter().submit_order(
         "order-1",
         make_intent(side="no", price=Decimal("0.53")),
@@ -189,8 +190,9 @@ def test_no_side_limit_order_does_not_fill_on_touch():
         make_market(no_ask=Decimal("0.53")),
     )
 
-    assert result.status == OrderIntentStatus.CANCELLED
-    assert result.fill_qty == 0
+    assert result.status == OrderIntentStatus.FILLED
+    assert result.fill_price == Decimal("0.53")
+    assert result.fill_qty == 100
 
 
 def test_no_side_market_order_uses_no_ask_with_slippage():

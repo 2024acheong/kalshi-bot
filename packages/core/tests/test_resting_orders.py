@@ -66,14 +66,16 @@ def test_order_does_not_fill_when_not_crossed() -> None:
     assert book.get_open_orders()[0].order_id == order_id
 
 
-def test_order_does_not_fill_on_touch() -> None:
+def test_order_fills_on_touch() -> None:
     book = make_book()
     book.add_order(make_intent(price=Decimal("0.45")), 30, BASE_TIME)
 
     results = book.check_tick(make_market(yes_ask=Decimal("0.45")), BASE_TIME)
 
-    assert results == []
-    assert len(book.get_open_orders()) == 1
+    assert len(results) == 1
+    assert results[0][1].status == OrderIntentStatus.FILLED
+    assert results[0][1].fill_qty == 20
+    assert book.get_open_orders() == []
 
 
 def test_order_fills_when_market_crosses() -> None:
@@ -188,7 +190,7 @@ def test_check_limit_crossed_yes_side() -> None:
         make_intent(side="yes", price=Decimal("0.45")),
         make_market(yes_ask=Decimal("0.44")),
     )
-    assert not check_limit_crossed(
+    assert check_limit_crossed(
         make_intent(side="yes", price=Decimal("0.45")),
         make_market(yes_ask=Decimal("0.45")),
     )
@@ -203,7 +205,7 @@ def test_check_limit_crossed_no_side() -> None:
         make_intent(side="no", price=Decimal("0.55")),
         make_market(no_ask=Decimal("0.54")),
     )
-    assert not check_limit_crossed(
+    assert check_limit_crossed(
         make_intent(side="no", price=Decimal("0.55")),
         make_market(no_ask=Decimal("0.55")),
     )
