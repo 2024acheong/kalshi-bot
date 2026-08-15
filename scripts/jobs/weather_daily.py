@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 
 from _bootstrap import add_repo_paths
 
@@ -20,7 +21,7 @@ def _weather_cities() -> list[str]:
 
 
 async def main() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), stream=sys.stdout)
     backfill_weather_markets()
     for city in _weather_cities():
         await backfill_ncei_daily_summary_outcomes(city)
