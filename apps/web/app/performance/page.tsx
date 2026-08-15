@@ -68,13 +68,6 @@ type SignalRow = {
   strategy_runs?: RunRelation | RunRelation[] | null
 }
 
-type MarketSnapshotRow = {
-  ticker: string | null
-  yes_bid: number | string | null
-  no_bid: number | string | null
-  timestamp: string | null
-}
-
 type PaperAccountRow = {
   id: string
   config_id: string | null
@@ -94,6 +87,10 @@ type RealizedRunPnl = {
   realizedFees: number
   realizedPnl: number
 }
+
+const MAX_PERFORMANCE_FILLS = 2000
+const MAX_PERFORMANCE_SIGNALS = 2000
+const MAX_PERFORMANCE_POSITIONS = 1000
 
 function firstRelation<T>(value: T | T[] | null | undefined) {
   return Array.isArray(value) ? value[0] ?? null : value ?? null
@@ -310,7 +307,6 @@ export default async function PerformancePage() {
     fillsResponse,
     positionsResponse,
     signalsResponse,
-    snapshotsResponse,
     accountsResponse,
   ] = await Promise.all([
     fetchAllRows<FillWithOrder>(
@@ -344,7 +340,7 @@ export default async function PerformancePage() {
         .order('created_at', { ascending: false })
         .range(from, to),
       500,
-      3000,
+      MAX_PERFORMANCE_FILLS,
     ),
     fetchAllRows<PositionRow>((from, to) =>
       supabase
@@ -352,6 +348,8 @@ export default async function PerformancePage() {
         .select('run_id,ticker,side,qty,avg_entry,unrealized_pnl')
         .neq('qty', 0)
         .range(from, to),
+      500,
+      MAX_PERFORMANCE_POSITIONS,
     ),
     fetchAllRows<SignalRow>(
       (from, to) => supabase
@@ -373,16 +371,7 @@ export default async function PerformancePage() {
         .order('created_at', { ascending: false })
         .range(from, to),
       500,
-      3000,
-    ),
-    fetchAllRows<MarketSnapshotRow>(
-      (from, to) => supabase
-        .from('market_snapshots')
-        .select('ticker,yes_bid,no_bid,timestamp')
-        .order('timestamp', { ascending: false })
-        .range(from, to),
-      1000,
-      5000,
+      MAX_PERFORMANCE_SIGNALS,
     ),
     fetchAllRows<PaperAccountRow>((from, to) =>
       supabase
@@ -397,7 +386,6 @@ export default async function PerformancePage() {
     fillsResponse.error ??
     positionsResponse.error ??
     signalsResponse.error ??
-    snapshotsResponse.error ??
     accountsResponse.error
   if (firstError) {
     return <div className="card red">Error loading performance: {firstError.message}</div>
@@ -406,19 +394,12 @@ export default async function PerformancePage() {
   const fills = fillsResponse.data
   const positions = positionsResponse.data
   const signals = signalsResponse.data
-  const snapshots = snapshotsResponse.data
   const accounts = accountsResponse.data
   const accountByConfigId = new Map(
     accounts
       .filter((account) => account.config_id)
       .map((account) => [account.config_id as string, account]),
   )
-  const latestSnapshotByTicker = new Map<string, MarketSnapshotRow>()
-  for (const snapshot of snapshots) {
-    if (snapshot.ticker && !latestSnapshotByTicker.has(snapshot.ticker)) {
-      latestSnapshotByTicker.set(snapshot.ticker, snapshot)
-    }
-  }
   const byRun = new Map<
     string,
     {
@@ -538,20 +519,7 @@ export default async function PerformancePage() {
     }
     const row = byRun.get(position.run_id)
     if (row) {
-      const latestSnapshot = position.ticker ? latestSnapshotByTicker.get(position.ticker) : null
-      const side = position.side
-      const mark =
-        side === 'yes'
-          ? Number(latestSnapshot?.yes_bid ?? NaN)
-          : side === 'no'
-            ? Number(latestSnapshot?.no_bid ?? NaN)
-            : NaN
-      const qty = Number(position.qty ?? 0)
-      const avgEntry = Number(position.avg_entry ?? NaN)
-      row.openMarkPnl +=
-        Number.isFinite(mark) && Number.isFinite(avgEntry)
-          ? (mark - avgEntry) * qty
-          : Number(position.unrealized_pnl ?? 0)
+      row.openMarkPnl += Number(position.unrealized_pnl ?? 0)
     }
   }
 

@@ -30,12 +30,12 @@ class SimulationConfig:
 
 
 def check_limit_traded_through(intent: OrderIntent, market: MarketState) -> bool:
-    """Return True only when the market trades through this limit price."""
+    """Return True when the current ask is marketable against this buy limit."""
     if intent.side == "yes":
-        return market.yes_ask is not None and market.yes_ask < intent.price
+        return market.yes_ask is not None and market.yes_ask <= intent.price
 
     if intent.side == "no":
-        return market.no_ask is not None and market.no_ask < intent.price
+        return market.no_ask is not None and market.no_ask <= intent.price
 
     return False
 
